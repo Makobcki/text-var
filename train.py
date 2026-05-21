@@ -37,6 +37,23 @@ def _collate_tokens(batch: list[dict[str, Any]]) -> list[torch.Tensor]:
     ]
 
 
+
+
+def _resolve_amp_dtype(name: str) -> torch.dtype:
+    if name == "bf16":
+        return torch.bfloat16
+    if name == "fp16":
+        return torch.float16
+    raise ValueError(f"Unsupported AMP dtype: {name}")
+
+
+def _is_amp_available(device: torch.device, amp_dtype: torch.dtype) -> bool:
+    if device.type != "cuda":
+        return False
+    if amp_dtype is torch.float16:
+        return True
+    return torch.cuda.is_bf16_supported()
+
 def _build_dataset(cfg: TrainConfig) -> MultiscaleTokenDataset:
     if cfg.token_cache_path is not None:
         entries, actual_metadata = load_token_entries(cfg.token_cache_path)
@@ -106,19 +123,39 @@ def run_training(cfg: TrainConfig) -> Path:
 
     device = _resolve_device(cfg.device)
     model = VARTransformer(cfg.model).to(device)
+    if bool(cfg.compile_enabled):
+        if hasattr(torch, "compile"):
+            model = torch.compile(model)
+            print("[TRAIN] torch.compile enabled.")
+        else:
+            print("[TRAIN] torch.compile requested but unavailable in this PyTorch build.")
+
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
     )
 
     dataset = _build_dataset(cfg)
     dataloader = DataLoader(
-        dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=_collate_tokens
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        collate_fn=_collate_tokens,
+        pin_memory=bool(cfg.pin_memory),
     )
+
+    amp_dtype = _resolve_amp_dtype(cfg.amp_dtype)
+    amp_enabled = bool(cfg.amp_enabled) and _is_amp_available(device, amp_dtype)
+    if bool(cfg.amp_enabled) and not amp_enabled:
+        print("[TRAIN] AMP requested but unavailable on selected device; fallback to fp32.")
+
+    scaler = torch.amp.GradScaler(enabled=amp_enabled and amp_dtype is torch.float16)
+    grad_accum_steps = max(1, int(cfg.grad_accum_steps))
 
     step = 0
     last_loss = 0.0
     accumulated_steps_per_phase = 0
     current_phase = 0
+    micro_step = 0
     apply_phase_freezing(model, current_phase)
 
     model.train()
@@ -138,34 +175,54 @@ def run_training(cfg: TrainConfig) -> Path:
                 apply_phase_freezing(model, current_phase)
                 print(f"[TRAIN] Переключение фазы обучения на: {current_phase + 1}")
 
-            moved_tokens = [t.to(device) for t in batch]
+            non_blocking = bool(cfg.pin_memory) and device.type == "cuda"
+            moved_tokens = [t.to(device, non_blocking=non_blocking) for t in batch]
 
-            optimizer.zero_grad()
-            loss = multiscale_next_scale_cross_entropy(
-                model,
-                moved_tokens,
-                level_weights=cfg.level_weights,
-                corruption_level_idx=cfg.corruption_level_idx,
-                corruption_prob=cfg.corruption_prob,
-                corruption_span_min=cfg.corruption_span_min,
-                corruption_span_max=cfg.corruption_span_max,
-                masked_loss_weight=cfg.masked_loss_weight,
-            )
-            loss.backward()
+            micro_step += 1
+            should_step = micro_step % grad_accum_steps == 0
 
-            if float(cfg.grad_clip_norm) > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+            if micro_step % grad_accum_steps == 1:
+                optimizer.zero_grad(set_to_none=True)
 
-            optimizer.step()
-            step += 1
-            accumulated_steps_per_phase += 1
-            last_loss = float(loss.detach().cpu())
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+                loss = multiscale_next_scale_cross_entropy(
+                    model,
+                    moved_tokens,
+                    level_weights=cfg.level_weights,
+                    corruption_level_idx=cfg.corruption_level_idx,
+                    corruption_prob=cfg.corruption_prob,
+                    corruption_span_min=cfg.corruption_span_min,
+                    corruption_span_max=cfg.corruption_span_max,
+                    masked_loss_weight=cfg.masked_loss_weight,
+                )
 
-            print(
-                f"[TRAIN] family=var phase={current_phase + 1} step={step}/{cfg.max_steps} loss={last_loss:.6f}"
-            )
+            scaled_loss = loss / grad_accum_steps
 
-            if int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
+            if scaler.is_enabled():
+                scaler.scale(scaled_loss).backward()
+                if should_step:
+                    if float(cfg.grad_clip_norm) > 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+                    scaler.step(optimizer)
+                    scaler.update()
+            else:
+                scaled_loss.backward()
+                if should_step:
+                    if float(cfg.grad_clip_norm) > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+                    optimizer.step()
+
+            if should_step:
+                step += 1
+                accumulated_steps_per_phase += 1
+                last_loss = float(loss.detach().cpu())
+
+                print(
+                    f"[TRAIN] family=var phase={current_phase + 1} step={step}/{cfg.max_steps} loss={last_loss:.6f}"
+                )
+
+            if should_step and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
                 save_checkpoint(
                     cfg.checkpoint_path,
                     model=model,
@@ -176,8 +233,24 @@ def run_training(cfg: TrainConfig) -> Path:
             if step >= int(cfg.max_steps):
                 break
 
+
+
         if not saw_batch:
             raise RuntimeError("VAR training dataloader produced no batches.")
+
+    if step < int(cfg.max_steps) and micro_step % grad_accum_steps != 0:
+        if scaler.is_enabled():
+            if float(cfg.grad_clip_norm) > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            if float(cfg.grad_clip_norm) > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+            optimizer.step()
+        step += 1
+        last_loss = float(loss.detach().cpu())
 
     save_checkpoint(
         cfg.checkpoint_path,

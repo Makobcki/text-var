@@ -3,6 +3,25 @@ import torch.nn.functional as F
 
 from model import VARTransformer
 
+try:
+    from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _flash_cross_entropy_loss
+except Exception:  # flash-attn is optional
+    _flash_cross_entropy_loss = None
+
+
+def _cross_entropy_per_token(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    use_flash: bool,
+) -> torch.Tensor:
+    if use_flash and _flash_cross_entropy_loss is not None and logits.is_cuda:
+        losses, _ = _flash_cross_entropy_loss(logits, target)
+        return losses
+    flat_logits = logits.reshape(-1, logits.size(-1))
+    flat_target = target.reshape(-1)
+    return F.cross_entropy(flat_logits, flat_target, reduction="none")
+
 
 def multiscale_next_scale_cross_entropy(
     model: VARTransformer,
@@ -32,6 +51,7 @@ def multiscale_next_scale_cross_entropy(
 
     scale_losses = []
     batch_size = moved_tokens[0].size(0)
+    use_flash = bool(getattr(model.cfg, "flash_cross_entropy", True))
 
     for target_idx in range(len(moved_tokens)):
         prefix_inputs = moved_tokens[:target_idx]
@@ -76,13 +96,14 @@ def multiscale_next_scale_cross_entropy(
         )
         current_scale_loss = 0.0
 
+        flat_target = target.reshape(-1)
+        flat_mask = mask_positions.reshape(-1) if mask_positions is not None else None
+
         for i, pred in enumerate(all_predictions):
             is_early = i < (len(all_predictions) - 1)
-            flat_pred = pred.reshape(-1, pred.size(-1))
-            flat_target = target.reshape(-1)
-            per_token = F.cross_entropy(flat_pred, flat_target, reduction="none")
-            if mask_positions is not None and mask_positions.any():
-                flat_mask = mask_positions.reshape(-1)
+            per_token = _cross_entropy_per_token(pred, flat_target, use_flash=use_flash)
+
+            if flat_mask is not None and flat_mask.any():
                 masked_part = per_token[flat_mask]
                 unmasked_part = per_token[~flat_mask]
                 if masked_part.numel() > 0 and unmasked_part.numel() > 0:
