@@ -1,18 +1,23 @@
-import math
-
 import torch
 import torch.nn.functional as F
 
 from model import VARTransformer
 
 
-def thermodynamic_sampling(
+class RollbackEvent(RuntimeError):
+    def __init__(self, block_start: int, block_end: int) -> None:
+        super().__init__(f"Rollback requested for block [{block_start}, {block_end})")
+        self.block_start = block_start
+        self.block_end = block_end
+
+
+def thermodynamic_sampling_with_stats(
     logits: torch.Tensor,
     alpha: float = 1.0,
     t_min: float = 0.1,
     t_max: float = 2.0,
     healthy_entropy_limit: float = 1.5,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     probs = F.softmax(logits, dim=-1)
     entropy = -torch.sum(probs * torch.log(probs + 1e-9), dim=-1)
 
@@ -31,7 +36,35 @@ def thermodynamic_sampling(
     scaled_logits = logits / t_dynamic
     next_tokens = torch.distributions.Categorical(logits=scaled_logits).sample()
 
-    return next_tokens
+    return next_tokens, entropy, chaos_diff
+
+
+
+
+def _decode_next_ar_token(
+    model: VARTransformer,
+    *,
+    prefix_inputs: list[torch.Tensor],
+    target_level: int,
+    sequence: torch.Tensor,
+    cfg_scale: float,
+    alpha: float,
+    healthy_entropy_limit: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch = sequence.shape[0]
+    prompt = torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=sequence.device)
+    ar_input = torch.cat([sequence, prompt], dim=1)
+    logits = model(
+        prefix_inputs=prefix_inputs,
+        target_level=target_level,
+        current_level_input=ar_input,
+        batch_size=batch,
+        cfg_scale=cfg_scale,
+    )
+    pos = sequence.shape[1]
+    return thermodynamic_sampling_with_stats(
+        logits[:, pos, :], alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+    )
 
 
 @torch.no_grad()
@@ -49,68 +82,97 @@ def hybrid_cascade_decode(
     batch = int(batch_size)
     out: list[torch.Tensor] = []
 
-    # ==========================================
-    # ФАЗА 1: Уровень 0 (Сюжет) — Авторегрессия (AR)
-    # ==========================================
     len_lvl_0 = model.cfg.level_lengths[0]
-    print(f"[HYBRID] Фаза 1: AR Генерация ({len_lvl_0} шагов)...")
-
+    print(f"[HYBRID] Фаза 1: AR Генерация макро-плана ({len_lvl_0} шагов)...")
     lvl_0_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
-
-    for step in range(len_lvl_0):
-        logits = model(
+    for _ in range(len_lvl_0):
+        next_token, _, _ = _decode_next_ar_token(
+            model,
             prefix_inputs=[],
             target_level=0,
-            current_level_input=lvl_0_sequence if step > 0 else None,
-            batch_size=batch,
+            sequence=lvl_0_sequence,
             cfg_scale=cfg_scale,
-        )
-
-        next_token_logits = logits[:, -1, :]
-        next_token = thermodynamic_sampling(
-            next_token_logits, alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+            alpha=alpha,
+            healthy_entropy_limit=healthy_entropy_limit,
         )
         lvl_0_sequence = torch.cat([lvl_0_sequence, next_token.unsqueeze(1)], dim=1)
-
     out.append(lvl_0_sequence)
 
-    # ==========================================
-    # ФАЗА 2: Уровень 1 (Текст) — Итеративный NAR
-    # ==========================================
     len_lvl_1 = model.cfg.level_lengths[1]
-    mask_id = model.cfg.mask_token_id
-    print(f"[HYBRID] Фаза 2: NAR Распаковка ({nar_steps} итераций)...")
-
-    lvl_1_tokens = torch.full((batch, len_lvl_1), mask_id, dtype=torch.long, device=device)
-
-    for step in range(nar_steps):
-        logits = model(
-            prefix_inputs=out, target_level=1, current_level_input=lvl_1_tokens, cfg_scale=cfg_scale
+    print(f"[HYBRID] Фаза 2: AR Генерация структурного каркаса ({len_lvl_1} шагов)...")
+    lvl_1_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
+    for _ in range(len_lvl_1):
+        next_token, _, _ = _decode_next_ar_token(
+            model,
+            prefix_inputs=out,
+            target_level=1,
+            sequence=lvl_1_sequence,
+            cfg_scale=cfg_scale,
+            alpha=alpha,
+            healthy_entropy_limit=healthy_entropy_limit,
         )
+        lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)
+    out.append(lvl_1_sequence)
 
-        probs = F.softmax(logits, dim=-1)
-        pred_tokens = torch.argmax(probs, dim=-1)
-        confidences = torch.max(probs, dim=-1)[0]
+    len_lvl_2 = model.cfg.level_lengths[2]
+    block_count = max(1, len_lvl_1)
+    block_size = max(1, len_lvl_2 // block_count)
+    print(f"[HYBRID] Фаза 3: Block-Local AR ({block_count} блоков, block_size={block_size})...")
 
-        if step == nar_steps - 1:
-            lvl_1_tokens = pred_tokens
+    lvl_2_tokens = torch.full((batch, len_lvl_2), model.cfg.pad_token_id, dtype=torch.long, device=device)
+    max_backtracks = 2
+    chaos_streak_limit = 2
+
+    for block_idx in range(block_count):
+        start_idx = block_idx * block_size
+        if start_idx >= len_lvl_2:
             break
+        end_idx = len_lvl_2 if block_idx == block_count - 1 else min(len_lvl_2, start_idx + block_size)
+        block_len = end_idx - start_idx
 
-        ratio = (step + 1) / nar_steps
-        keep_ratio = math.cos(math.pi / 2 * (1 - ratio))
-        num_to_keep = int(len_lvl_1 * keep_ratio)
+        state = "DECODE_BLOCK"
+        attempt = 0
+        while state != "COMMIT_BLOCK":
+            if attempt > max_backtracks:
+                state = "COMMIT_BLOCK"
+                continue
 
-        already_unmasked = lvl_1_tokens != mask_id
-        confidences[already_unmasked] = float("inf")
+            try:
+                local_chunk = torch.full((batch, block_len), model.cfg.mask_token_id, dtype=torch.long, device=device)
+                chaos_streak = 0
 
-        _, topk_indices = torch.topk(confidences, k=num_to_keep, dim=-1)
+                for local_step in range(block_len):
+                    # Дополнительный проход только по маскированному чанку (latent inpainting region)
+                    chunk_context = local_chunk[:, : local_step + 1]
+                    logits = model(
+                        prefix_inputs=out,
+                        target_level=2,
+                        current_level_input=chunk_context,
+                        cfg_scale=cfg_scale,
+                        compact_memory_for_final_level=True,
+                    )
+                    next_token, _, chaos_diff = thermodynamic_sampling_with_stats(
+                        logits[:, local_step, :], alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+                    )
 
-        new_mask = torch.ones((batch, len_lvl_1), dtype=torch.bool, device=device)
-        new_mask.scatter_(dim=-1, index=topk_indices, value=False)
+                    if torch.any(chaos_diff > 0):
+                        chaos_streak += 1
+                    else:
+                        chaos_streak = 0
 
-        lvl_1_tokens = torch.where(new_mask, torch.tensor(mask_id, device=device), pred_tokens)
+                    if chaos_streak >= chaos_streak_limit:
+                        raise RollbackEvent(start_idx, end_idx)
 
-    out.append(lvl_1_tokens)
+                    local_chunk[:, local_step] = next_token
+
+                lvl_2_tokens[:, start_idx:end_idx] = local_chunk
+                state = "COMMIT_BLOCK"
+
+            except RollbackEvent:
+                # FSM rollback: откат к началу блока + маскирование блока
+                lvl_2_tokens[:, start_idx:end_idx] = model.cfg.mask_token_id
+                attempt += 1
+                state = "DECODE_BLOCK"
+    out.append(lvl_2_tokens)
     print("[HYBRID] Генерация завершена.")
-
     return out

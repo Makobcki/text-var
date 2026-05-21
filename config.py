@@ -8,10 +8,10 @@ from typing import Any, Optional
 class VARConfig:
     # Уровень 0: Семантические токены (VQ-VAE словарь сюжетов)
     # Уровень 1: Локальные токены (BPE словарь текста)
-    level_vocab_sizes: tuple[int, ...] = (4096, 32000)
+    level_vocab_sizes: tuple[int, ...] = (4096, 2048, 32000)
 
     # 32 "сюжетных" шага, 1024 текстовых BPE-шага
-    level_lengths: tuple[int, ...] = (32, 1024)
+    level_lengths: tuple[int, ...] = (32, 128, 1024)
 
     hidden_size: int = 1024
     depth: int = 16
@@ -25,8 +25,8 @@ class VARConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VARConfig":
         return cls(
-            level_vocab_sizes=tuple(int(v) for v in data.get("level_vocab_sizes", (4096, 32000))),
-            level_lengths=tuple(int(v) for v in data.get("level_lengths", (32, 1024))),
+            level_vocab_sizes=tuple(int(v) for v in data.get("level_vocab_sizes", (4096, 2048, 32000))),
+            level_lengths=tuple(int(v) for v in data.get("level_lengths", (32, 128, 1024))),
             hidden_size=int(data.get("hidden_size", 1024)),
             depth=int(data.get("depth", 16)),
             num_heads=int(data.get("num_heads", 16)),
@@ -76,6 +76,7 @@ class SampleConfig:
     t_min: float = 0.1
     t_max: float = 2.0
     cfg_scale: float = 1.0
+    max_backtracks_per_block: int = 2
 
 
 def load_train_config(path: Path) -> TrainConfig:
@@ -126,4 +127,5 @@ def load_sample_config(path: Path) -> SampleConfig:
         t_min=float(data.get("t_min", 0.1)),
         t_max=float(data.get("t_max", 2.0)),
         cfg_scale=float(data.get("cfg_scale", 1.0)),
+        max_backtracks_per_block=int(data.get("max_backtracks_per_block", 2)),
     )
