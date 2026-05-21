@@ -55,16 +55,49 @@ def _build_dataset(cfg: TrainConfig) -> MultiscaleTokenDataset:
     return MultiscaleTokenDataset(entries, dummy_meta)
 
 
-def apply_phase_freezing(model: VARTransformer, phase_idx: int) -> None:
-    for p in model.parameters():
-        p.requires_grad = True
+def _set_trainable(module: torch.nn.Module, enabled: bool) -> None:
+    for param in module.parameters():
+        param.requires_grad = enabled
 
-    # Безопасное замораживание без обращения к несуществующим эмбеддингам
-    if phase_idx == 0:
-        for idx in range(1, len(model.token_embeddings)):
-            for p in model.token_embeddings[idx].parameters():
-                p.requires_grad = False
-    model.local_position_embedding.requires_grad = True
+
+def apply_phase_freezing(model: VARTransformer, phase_idx: int) -> None:
+    for param in model.parameters():
+        param.requires_grad = False
+
+    levels = len(model.token_embeddings)
+    depth = len(model.blocks)
+    segment = max(1, depth // max(1, levels))
+
+    phase = max(0, min(int(phase_idx), levels - 1))
+    block_start = min(depth, phase * segment)
+    block_end = depth if phase == levels - 1 else min(depth, (phase + 1) * segment)
+
+    # Анти-drift режим: общий ствол/общие эмбеддинги фиксируем после старта
+    _set_trainable(model.scale_embedding, phase == 0)
+    _set_trainable(model.local_position_embedding, phase == 0)
+    model.target_token.requires_grad = phase == 0
+
+    # Обучаем только активный уровень (токен-эмбеддинг + головы)
+    _set_trainable(model.token_embeddings[phase], True)
+    _set_trainable(model.heads[phase], True)
+
+    for key, head in model.early_exit_heads.items():
+        scale_tag = f"_scale_{phase}"
+        _set_trainable(head, scale_tag in key)
+
+    # Послойная заморозка: активен только сегмент блоков текущей фазы
+    for block_idx, block in enumerate(model.blocks):
+        _set_trainable(block, block_start <= block_idx < block_end)
+
+    # LayerNorm оставляем обучаемым для адаптации распределений в каждой фазе
+    _set_trainable(model.norm, True)
+
+    print(
+        "[TRAIN] freeze-policy "
+        f"phase={phase + 1}/{levels} "
+        f"active_level={phase} "
+        f"active_blocks=[{block_start}, {max(block_start, block_end)})"
+    )
 
 
 def run_training(cfg: TrainConfig) -> Path:
