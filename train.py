@@ -142,7 +142,14 @@ def run_training(cfg: TrainConfig) -> Path:
 
             optimizer.zero_grad()
             loss = multiscale_next_scale_cross_entropy(
-                model, moved_tokens, level_weights=cfg.level_weights
+                model,
+                moved_tokens,
+                level_weights=cfg.level_weights,
+                corruption_level_idx=cfg.corruption_level_idx,
+                corruption_prob=cfg.corruption_prob,
+                corruption_span_min=cfg.corruption_span_min,
+                corruption_span_max=cfg.corruption_span_max,
+                masked_loss_weight=cfg.masked_loss_weight,
             )
             loss.backward()
 

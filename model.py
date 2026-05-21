@@ -133,11 +133,16 @@ class VARTransformer(nn.Module):
                 head_key = f"layer_{layer_idx}_scale_{scale_idx}"
                 self.early_exit_heads[head_key] = nn.Linear(hidden, vocab_size)
 
-    def _make_sliding_window_mask(self, seq_len: int, window_size: int, device: torch.device) -> torch.Tensor:
+    def _make_local_bidirectional_mask(self, seq_len: int, radius: int, device: torch.device) -> torch.Tensor:
+        """Return a local bidirectional attention mask for SDPA.
+
+        Tokens can attend to neighbors on both sides inside ``radius`` positions.
+        Anything outside the local window is masked out.
+        """
         idx = torch.arange(seq_len, device=device)
         row = idx.unsqueeze(1)
         col = idx.unsqueeze(0)
-        invalid = (col > row) | (col + window_size < row)
+        invalid = (col - row).abs() > radius
         return invalid.view(1, 1, seq_len, seq_len)
 
     def forward(
@@ -213,11 +218,11 @@ class VARTransformer(nn.Module):
 
         self_mask = None
         self_is_causal = False
-        if target_idx == 0:
+        if target_idx < len(self.cfg.level_lengths) - 1:
             self_is_causal = True
-        elif target_idx == len(self.cfg.level_lengths) - 1:
+        else:
             window = max(32, min(512, self.cfg.level_lengths[target_idx] // 8))
-            self_mask = self._make_sliding_window_mask(target_len, window, device)
+            self_mask = self._make_local_bidirectional_mask(target_len, window, device)
 
         early_outputs = []
         for layer_idx, block in enumerate(self.blocks):
