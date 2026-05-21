@@ -1,7 +1,7 @@
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,12 @@ class TrainConfig:
     corruption_span_min: int = 8
     corruption_span_max: int = 64
     masked_loss_weight: float = 0.85
+    amp_enabled: bool = True
+    amp_dtype: Literal["bf16", "fp16"] = "bf16"
+    compile_enabled: bool = False
+    pin_memory: bool = True
+    grad_accum_steps: int = 1
+    flash_cross_entropy: bool = True
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,12 @@ def load_train_config(path: Path) -> TrainConfig:
         corruption_span_min=int(data.get("corruption_span_min", 8)),
         corruption_span_max=int(data.get("corruption_span_max", 64)),
         masked_loss_weight=float(data.get("masked_loss_weight", 0.85)),
+        amp_enabled=bool(data.get("amp_enabled", True)),
+        amp_dtype=str(data.get("amp_dtype", "bf16")).lower(),
+        compile_enabled=bool(data.get("compile_enabled", False)),
+        pin_memory=bool(data.get("pin_memory", True)),
+        grad_accum_steps=max(1, int(data.get("grad_accum_steps", 1))),
+        flash_cross_entropy=bool(data.get("flash_cross_entropy", True)),
     )
 
 

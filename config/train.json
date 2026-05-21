@@ -33,5 +33,11 @@
     ],
     "codebook_dim": 256,
     "max_token_length": 1184
-  }
+  },
+  "amp_enabled": true,
+  "amp_dtype": "bf16",
+  "compile_enabled": false,
+  "pin_memory": true,
+  "grad_accum_steps": 1,
+  "flash_cross_entropy": true
 }
