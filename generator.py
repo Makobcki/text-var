@@ -49,8 +49,8 @@ def _decode_next_ar_token(
     healthy_entropy_limit: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch = sequence.shape[0]
-    prompt = torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=sequence.device)
-    ar_input = torch.cat([sequence, prompt], dim=1)
+    bos = torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=sequence.device)
+    ar_input = torch.cat([bos, sequence], dim=1)
     logits = model(
         prefix_inputs=prefix_inputs,
         target_level=target_level,
@@ -119,6 +119,7 @@ def _inpaint_block_seams(
     alpha: float,
     healthy_entropy_limit: float,
     seam_tokens: int = 3,
+    max_seams_per_pass: int = 10,
 ) -> torch.Tensor:
     batch_size, seq_len = lvl_2_tokens.shape
     seam_spans: list[tuple[int, int]] = []
@@ -134,40 +135,43 @@ def _inpaint_block_seams(
     if not seam_spans:
         return lvl_2_tokens
 
-    expanded = lvl_2_tokens.repeat_interleave(len(seam_spans), dim=0)
-    mask_positions: list[tuple[int, int]] = []
-    row = 0
-    for b in range(batch_size):
-        for left, right in seam_spans:
-            expanded[row, left:right] = model.cfg.mask_token_id
-            for pos in range(left, right):
-                mask_positions.append((row, pos))
-            row += 1
-
-    logits = model(
-        prefix_inputs=[x.repeat_interleave(len(seam_spans), dim=0) for x in prefix_inputs],
-        target_level=2,
-        current_level_input=expanded,
-        cfg_scale=cfg_scale,
-        compact_memory_for_final_level=True,
-    )
-
-    pos_rows = torch.tensor([r for r, _ in mask_positions], device=lvl_2_tokens.device)
-    pos_cols = torch.tensor([c for _, c in mask_positions], device=lvl_2_tokens.device)
-    masked_logits = logits[pos_rows, pos_cols, :]
-    sampled, _, _ = thermodynamic_sampling_with_stats(
-        masked_logits,
-        alpha=alpha,
-        healthy_entropy_limit=healthy_entropy_limit,
-    )
-    expanded[pos_rows, pos_cols] = sampled
-
     stitched = lvl_2_tokens.clone()
-    row = 0
-    for b in range(batch_size):
-        for left, right in seam_spans:
-            stitched[b, left:right] = expanded[row, left:right]
-            row += 1
+    seams_per_pass = max(1, int(max_seams_per_pass))
+    for seam_offset in range(0, len(seam_spans), seams_per_pass):
+        seam_chunk = seam_spans[seam_offset : seam_offset + seams_per_pass]
+        expanded = stitched.repeat_interleave(len(seam_chunk), dim=0)
+        mask_positions: list[tuple[int, int]] = []
+        row = 0
+        for b in range(batch_size):
+            for left, right in seam_chunk:
+                expanded[row, left:right] = model.cfg.mask_token_id
+                for pos in range(left, right):
+                    mask_positions.append((row, pos))
+                row += 1
+
+        logits = model(
+            prefix_inputs=[x.repeat_interleave(len(seam_chunk), dim=0) for x in prefix_inputs],
+            target_level=2,
+            current_level_input=expanded,
+            cfg_scale=cfg_scale,
+            compact_memory_for_final_level=True,
+        )
+
+        pos_rows = torch.tensor([r for r, _ in mask_positions], device=lvl_2_tokens.device)
+        pos_cols = torch.tensor([c for _, c in mask_positions], device=lvl_2_tokens.device)
+        masked_logits = logits[pos_rows, pos_cols, :]
+        sampled, _, _ = thermodynamic_sampling_with_stats(
+            masked_logits,
+            alpha=alpha,
+            healthy_entropy_limit=healthy_entropy_limit,
+        )
+        expanded[pos_rows, pos_cols] = sampled
+
+        row = 0
+        for b in range(batch_size):
+            for left, right in seam_chunk:
+                stitched[b, left:right] = expanded[row, left:right]
+                row += 1
     return stitched
 
 
@@ -181,6 +185,8 @@ def hybrid_cascade_decode(
     cfg_scale: float = 1.0,
     alpha: float = 1.0,
     healthy_entropy_limit: float = 1.5,
+    min_block_size_lvl2: int = 16,
+    max_seams_per_inpaint_pass: int = 10,
 ) -> list[torch.Tensor]:
 
     batch = int(batch_size)
@@ -219,8 +225,9 @@ def hybrid_cascade_decode(
     out.append(lvl_1_sequence)
 
     len_lvl_2 = model.cfg.level_lengths[2]
-    block_count = max(1, len_lvl_1)
-    block_size = max(1, len_lvl_2 // block_count)
+    min_block = max(1, int(min_block_size_lvl2))
+    block_count = max(1, min(len_lvl_1, len_lvl_2 // min_block))
+    block_size = max(min_block, len_lvl_2 // block_count)
 
     print(f"[HYBRID] Фаза 3.1: Параллельный драфт ({block_count} блоков, block_size={block_size})...")
     lvl_2_draft = _parallel_block_draft(
@@ -246,6 +253,7 @@ def hybrid_cascade_decode(
         cfg_scale=cfg_scale,
         alpha=alpha,
         healthy_entropy_limit=healthy_entropy_limit,
+        max_seams_per_pass=max_seams_per_inpaint_pass,
     )
 
     out.append(lvl_2_tokens)

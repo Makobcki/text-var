@@ -61,6 +61,11 @@ class TrainConfig:
     token_cache_path: Optional[Path] = None
     synthetic_count: int = 1000
     token_metadata: Optional[Any] = None
+    corruption_level_idx: int = -1
+    corruption_prob: float = 0.35
+    corruption_span_min: int = 8
+    corruption_span_max: int = 64
+    masked_loss_weight: float = 0.85
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,8 @@ class SampleConfig:
     t_max: float = 2.0
     cfg_scale: float = 1.0
     max_backtracks_per_block: int = 2
+    min_block_size_lvl2: int = 16
+    max_seams_per_inpaint_pass: int = 10
 
 
 def load_train_config(path: Path) -> TrainConfig:
@@ -108,6 +115,11 @@ def load_train_config(path: Path) -> TrainConfig:
         token_cache_path=Path(data["token_cache_path"]) if data.get("token_cache_path") else None,
         synthetic_count=int(data.get("synthetic_count", 1000)),
         token_metadata=token_metadata,
+        corruption_level_idx=int(data.get("corruption_level_idx", -1)),
+        corruption_prob=float(data.get("corruption_prob", 0.35)),
+        corruption_span_min=int(data.get("corruption_span_min", 8)),
+        corruption_span_max=int(data.get("corruption_span_max", 64)),
+        masked_loss_weight=float(data.get("masked_loss_weight", 0.85)),
     )
 
 
@@ -128,4 +140,6 @@ def load_sample_config(path: Path) -> SampleConfig:
         t_max=float(data.get("t_max", 2.0)),
         cfg_scale=float(data.get("cfg_scale", 1.0)),
         max_backtracks_per_block=int(data.get("max_backtracks_per_block", 2)),
+        min_block_size_lvl2=int(data.get("min_block_size_lvl2", 16)),
+        max_seams_per_inpaint_pass=int(data.get("max_seams_per_inpaint_pass", 10)),
     )

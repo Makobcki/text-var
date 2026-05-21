@@ -35,6 +35,8 @@ def run_sampling(cfg: SampleConfig) -> Path:
         alpha=cfg.thermodynamic_alpha,
         healthy_entropy_limit=cfg.entropy_threshold,
         nar_steps=4,
+        min_block_size_lvl2=cfg.min_block_size_lvl2,
+        max_seams_per_inpaint_pass=cfg.max_seams_per_inpaint_pass,
     )
 
     cfg.output_path.parent.mkdir(parents=True, exist_ok=True)
