@@ -5,8 +5,8 @@ from typing import Any
 
 import torch
 
-from var_branch.config import VARConfig
-from var_branch.model import VARTransformer
+from config import VARConfig
+from model import VARTransformer
 
 
 def save_checkpoint(

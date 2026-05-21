@@ -87,7 +87,7 @@ def load_train_config(path: Path) -> TrainConfig:
     # Ленивый импорт для предотвращения циклической зависимости при сборке метаданных
     token_metadata = None
     if data.get("token_metadata"):
-        from var_branch.token_cache import TokenCacheMetadata
+        from token_cache import TokenCacheMetadata
 
         token_metadata = TokenCacheMetadata.from_dict(data["token_metadata"])
 

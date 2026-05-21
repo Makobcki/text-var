@@ -8,12 +8,13 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-from var_branch.checkpoint import save_checkpoint
-from var_branch.config import TrainConfig, load_train_config
-from var_branch.loss import multiscale_next_scale_cross_entropy  # Сюда перемещен лосс
-from var_branch.model import VARTransformer
-from var_branch.token_cache import (
+from checkpoint import save_checkpoint
+from config import TrainConfig, load_train_config
+from loss import multiscale_next_scale_cross_entropy  # Сюда перемещен лосс
+from model import VARTransformer
+from token_cache import (
     MultiscaleTokenDataset,
+    TokenCacheMetadata,
     build_synthetic_token_entries,
     load_token_entries,
     validate_tokenizer_metadata,
@@ -39,12 +40,9 @@ def _collate_tokens(batch: list[dict[str, Any]]) -> list[torch.Tensor]:
 def _build_dataset(cfg: TrainConfig) -> MultiscaleTokenDataset:
     if cfg.token_cache_path is not None:
         entries, actual_metadata = load_token_entries(cfg.token_cache_path)
-        validate_tokenizer_metadata(actual_metadata, cfg.token_metadata)
+        if cfg.token_metadata is not None:
+            validate_tokenizer_metadata(actual_metadata, cfg.token_metadata)
         return MultiscaleTokenDataset(entries, actual_metadata)
-    entries = build_synthetic_token_entries(
-        cfg.synthetic_count, cfg.model.level_vocab_sizes, cfg.model.level_lengths
-    )
-    from var_branch.token_cache import TokenCacheMetadata
 
     dummy_meta = TokenCacheMetadata(
         kind="synthetic",
@@ -53,6 +51,7 @@ def _build_dataset(cfg: TrainConfig) -> MultiscaleTokenDataset:
         codebook_dim=int(cfg.model.hidden_size),
         max_token_length=sum(cfg.model.level_lengths),
     )
+    entries = build_synthetic_token_entries(dummy_meta, count=cfg.synthetic_count, seed=cfg.seed)
     return MultiscaleTokenDataset(entries, dummy_meta)
 
 

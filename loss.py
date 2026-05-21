@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from var_branch.model import VARTransformer
+from model import VARTransformer
 
 
 def multiscale_next_scale_cross_entropy(

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import torch
 
-from var_branch.checkpoint import load_checkpoint
-from var_branch.config import SampleConfig, load_sample_config
-from var_branch.generator import hybrid_cascade_decode  # Замена несуществующего генератора
+from checkpoint import load_checkpoint
+from config import SampleConfig, load_sample_config
+from generator import hybrid_cascade_decode  # Замена несуществующего генератора
 
 
 def _resolve_device(name: str) -> torch.device:
