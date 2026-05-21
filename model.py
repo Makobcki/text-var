@@ -133,6 +133,13 @@ class VARTransformer(nn.Module):
                 head_key = f"layer_{layer_idx}_scale_{scale_idx}"
                 self.early_exit_heads[head_key] = nn.Linear(hidden, vocab_size)
 
+    def _compress_memory(self, x: torch.Tensor, target_tokens: int) -> torch.Tensor:
+        seq_len = x.shape[1]
+        keep = max(1, min(int(target_tokens), seq_len))
+        if keep >= seq_len:
+            return x
+        return F.adaptive_avg_pool1d(x.transpose(1, 2), keep).transpose(1, 2)
+
     def _make_local_bidirectional_mask(self, seq_len: int, radius: int, device: torch.device) -> torch.Tensor:
         """Return a local bidirectional attention mask for SDPA.
 
