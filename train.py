@@ -72,10 +72,10 @@ def apply_phase_freezing(model: VARTransformer, phase_idx: int) -> None:
     block_start = min(depth, phase * segment)
     block_end = depth if phase == levels - 1 else min(depth, (phase + 1) * segment)
 
-    # Базовые компоненты всегда обучаемы
-    _set_trainable(model.scale_embedding, True)
-    _set_trainable(model.local_position_embedding, True)
-    model.target_token.requires_grad = True
+    # Анти-drift режим: общий ствол/общие эмбеддинги фиксируем после старта
+    _set_trainable(model.scale_embedding, phase == 0)
+    _set_trainable(model.local_position_embedding, phase == 0)
+    model.target_token.requires_grad = phase == 0
 
     # Обучаем только активный уровень (токен-эмбеддинг + головы)
     _set_trainable(model.token_embeddings[phase], True)
