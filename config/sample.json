@@ -1,0 +1,9 @@
+{
+  "checkpoint_path": "checkpoints/var_model_latest.pt",
+  "output_path": "data/generated_output.json",
+  "device": "cuda",
+  "batch_size": 2,
+  "cfg_scale": 1.5,
+  "thermodynamic_alpha": 1.0,
+  "entropy_threshold": 1.5
+}

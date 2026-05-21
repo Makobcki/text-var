@@ -1,0 +1,22 @@
+{
+  "seed": 42,
+  "device": "cuda",
+  "batch_size": 4,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.01,
+  "max_steps": 1000,
+  "grad_clip_norm": 1.0,
+  "save_every": 200,
+  "checkpoint_path": "checkpoints/var_model_latest.pt",
+  "phase_steps": [500, 500],
+  "level_weights": [1.0, 1.0],
+  "token_cache_path": null,
+  "synthetic_count": 100,
+  "token_metadata": {
+    "kind": "vq",
+    "level_vocab_sizes": [4096, 32000],
+    "level_lengths": [32, 1024],
+    "codebook_dim": 256,
+    "max_token_length": 1056
+  }
+}
