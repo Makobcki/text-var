@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from var_branch.model import VARTransformer
+from model import VARTransformer
 
 
 def thermodynamic_sampling(

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from var_branch.config import VARConfig
+from config import VARConfig
 
 
 class VARTransformer(nn.Module):
