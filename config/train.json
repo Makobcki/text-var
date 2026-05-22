@@ -8,14 +8,29 @@
   "grad_clip_norm": 1.0,
   "save_every": 200,
   "checkpoint_path": "checkpoints/var_model_latest.pt",
-  "phase_steps": [500, 500],
-  "level_weights": [1.0, 1.0, 1.0],
+  "phase_steps": [
+    500,
+    500
+  ],
+  "level_weights": [
+    1.0,
+    1.0,
+    1.0
+  ],
   "token_cache_path": "dataset_var_tokens",
   "synthetic_count": 100,
   "token_metadata": {
     "kind": "vq",
-    "level_vocab_sizes": [4096, 2048, 32000],
-    "level_lengths": [32, 128, 1024],
+    "level_vocab_sizes": [
+      4096,
+      2048,
+      32000
+    ],
+    "level_lengths": [
+      32,
+      128,
+      1024
+    ],
     "codebook_dim": 256,
     "max_token_length": 1184
   },
@@ -26,5 +41,6 @@
   "grad_accum_steps": 1,
   "flash_cross_entropy": true,
   "gradient_checkpointing": true,
-  "use_early_exit_loss": false
+  "use_early_exit_loss": false,
+  "optimizer": "adamw"
 }

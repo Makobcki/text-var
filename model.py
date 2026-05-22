@@ -236,13 +236,10 @@ class VARTransformer(nn.Module):
         local_ids = torch.arange(target_len, device=device)
         x = x + self.local_position_embedding(local_ids).view(1, target_len, -1)
 
+        # Keep attn_mask=None so SDPA can stay on Flash Attention kernels.
+        # Dense custom masks often force fallback to math backend with O(N^2) memory.
         self_mask = None
-        self_is_causal = False
-        if target_idx < len(self.cfg.level_lengths) - 1:
-            self_is_causal = True
-        else:
-            window = max(32, min(512, self.cfg.level_lengths[target_idx] // 8))
-            self_mask = self._make_local_bidirectional_mask(target_len, window, device)
+        self_is_causal = True
 
         early_outputs = []
         use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
