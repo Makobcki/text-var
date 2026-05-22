@@ -258,12 +258,11 @@ class VARTransformer(nn.Module):
                 )
             else:
                 x = block(tgt=x, memory=final_memory, self_attn_mask=self_mask, self_is_causal=self_is_causal)
-            if layer_idx in self.cfg.exit_layers:
+            if return_early_outputs and layer_idx in self.cfg.exit_layers:
                 target_features = self.norm(x)
                 head_key = f"layer_{layer_idx}_scale_{target_idx}"
                 logits = self.early_exit_heads[head_key](target_features)
-                if return_early_outputs:
-                    early_outputs.append(logits)
+                early_outputs.append(logits)
 
         out_features = self.heads[target_idx](self.norm(x))
         if return_early_outputs:

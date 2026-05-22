@@ -33,6 +33,7 @@ def multiscale_next_scale_cross_entropy(
     corruption_span_min: int = 8,
     corruption_span_max: int = 64,
     masked_loss_weight: float = 0.85,
+    use_early_exit_loss: bool = False,
 ) -> torch.Tensor:
     def _build_span_mask(batch: int, seq_len: int, prob: float, min_span: int, max_span: int, device: torch.device) -> torch.Tensor:
         if prob <= 0.0 or seq_len <= 0:
@@ -80,16 +81,24 @@ def multiscale_next_scale_cross_entropy(
                 model_input = target.clone()
                 model_input[mask_positions] = int(model.cfg.mask_token_id)
 
-        outputs = model(
-            prefix_inputs,
-            target_level=target_idx,
-            current_level_input=model_input,
-            batch_size=batch_size,
-            return_early_outputs=True,
-        )
-
-        final_pred, early_outputs = outputs
-        all_predictions = early_outputs + [final_pred]
+        if use_early_exit_loss:
+            final_pred, early_outputs = model(
+                prefix_inputs,
+                target_level=target_idx,
+                current_level_input=model_input,
+                batch_size=batch_size,
+                return_early_outputs=True,
+            )
+            all_predictions = early_outputs + [final_pred]
+        else:
+            final_pred = model(
+                prefix_inputs,
+                target_level=target_idx,
+                current_level_input=model_input,
+                batch_size=batch_size,
+                return_early_outputs=False,
+            )
+            all_predictions = [final_pred]
 
         level_weight = (
             level_weights[target_idx] if level_weights and target_idx < len(level_weights) else 1.0
