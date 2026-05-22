@@ -22,6 +22,7 @@ class VARConfig:
     pad_token_id: int = 0
     mask_token_id: int = 1  # Используется для NAR генерации
     gradient_checkpointing: bool = False
+    local_attention_radius: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VARConfig":
@@ -36,6 +37,7 @@ class VARConfig:
             pad_token_id=int(data.get("pad_token_id", 0)),
             mask_token_id=int(data.get("mask_token_id", 1)),
             gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
+            local_attention_radius=int(data.get("local_attention_radius", 0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,6 +78,14 @@ class TrainConfig:
     flash_cross_entropy: bool = True
     use_early_exit_loss: bool = False
     optimizer: Literal["adamw", "adamw8bit"] = "adamw"
+    resume_from: Optional[Path] = None
+    validation_every: int = 0
+    validation_batches: int = 8
+    validation_split: float = 0.0
+    val_token_cache_path: Optional[Path] = None
+    synthetic_val_count: int = 256
+    tensorboard_enabled: bool = False
+    log_dir: Path = Path("runs/var")
 
 
 @dataclass(frozen=True)
@@ -138,6 +148,14 @@ def load_train_config(path: Path) -> TrainConfig:
         flash_cross_entropy=bool(data.get("flash_cross_entropy", True)),
         use_early_exit_loss=bool(data.get("use_early_exit_loss", False)),
         optimizer=str(data.get("optimizer", "adamw")).lower(),
+        resume_from=Path(data["resume_from"]) if data.get("resume_from") else None,
+        validation_every=int(data.get("validation_every", 0)),
+        validation_batches=int(data.get("validation_batches", 8)),
+        validation_split=float(data.get("validation_split", 0.0)),
+        val_token_cache_path=Path(data["val_token_cache_path"]) if data.get("val_token_cache_path") else None,
+        synthetic_val_count=int(data.get("synthetic_val_count", 256)),
+        tensorboard_enabled=bool(data.get("tensorboard_enabled", False)),
+        log_dir=Path(data.get("log_dir", "runs/var")),
     )
 
 

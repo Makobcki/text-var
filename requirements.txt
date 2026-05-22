@@ -1,0 +1,8 @@
+torch>=2.2
+numpy>=1.24
+tqdm>=4.66
+tensorboard>=2.14
+
+# Optional accelerators
+bitsandbytes>=0.43 ; platform_system == "Linux"
+flash-attn>=2.5 ; platform_system == "Linux"

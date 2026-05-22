@@ -76,6 +76,7 @@ def _parallel_block_draft(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
+    rollback_chaos_threshold: float = 0.75,
 ) -> torch.Tensor:
     lvl_2_tokens = torch.full((batch_size, len_lvl_2), model.cfg.pad_token_id, dtype=torch.long, device=device)
 
@@ -99,11 +100,13 @@ def _parallel_block_draft(
             cfg_scale=cfg_scale,
             compact_memory_for_final_level=True,
         )
-        sampled, _, _ = thermodynamic_sampling_with_stats(
+        sampled, _, chaos = thermodynamic_sampling_with_stats(
             logits.view(-1, logits.shape[-1]),
             alpha=alpha,
             healthy_entropy_limit=healthy_entropy_limit,
         )
+        if float((chaos > 0).float().mean().detach().cpu()) > float(rollback_chaos_threshold):
+            raise RollbackEvent(start_idx, end_idx)
         lvl_2_tokens[:, start_idx:end_idx] = sampled.view(batch_size, block_len)
     return lvl_2_tokens
 
@@ -230,18 +233,34 @@ def hybrid_cascade_decode(
     block_size = max(min_block, len_lvl_2 // block_count)
 
     print(f"[HYBRID] Фаза 3.1: Параллельный драфт ({block_count} блоков, block_size={block_size})...")
-    lvl_2_draft = _parallel_block_draft(
-        model,
-        prefix_inputs=out,
-        len_lvl_2=len_lvl_2,
-        block_count=block_count,
-        block_size=block_size,
-        batch_size=batch,
-        device=device,
-        cfg_scale=cfg_scale,
-        alpha=alpha,
-        healthy_entropy_limit=healthy_entropy_limit,
-    )
+    try:
+        lvl_2_draft = _parallel_block_draft(
+            model,
+            prefix_inputs=out,
+            len_lvl_2=len_lvl_2,
+            block_count=block_count,
+            block_size=block_size,
+            batch_size=batch,
+            device=device,
+            cfg_scale=cfg_scale,
+            alpha=alpha,
+            healthy_entropy_limit=healthy_entropy_limit,
+        )
+    except RollbackEvent as event:
+        print(f"[HYBRID] rollback block=[{event.block_start}, {event.block_end}) -> conservative resample")
+        lvl_2_draft = _parallel_block_draft(
+            model,
+            prefix_inputs=out,
+            len_lvl_2=len_lvl_2,
+            block_count=block_count,
+            block_size=block_size,
+            batch_size=batch,
+            device=device,
+            cfg_scale=cfg_scale,
+            alpha=max(0.25, alpha * 0.5),
+            healthy_entropy_limit=healthy_entropy_limit,
+            rollback_chaos_threshold=1.0,
+        )
 
     print("[HYBRID] Фаза 3.2: Шовная склейка (latent inpainting)...")
     lvl_2_tokens = _inpaint_block_seams(
