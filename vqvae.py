@@ -91,13 +91,29 @@ class SemanticTextVQVAE(nn.Module):
         bos_token_id: int,
         eos_token_id: int | None = None,
     ) -> torch.Tensor:
+        """Decode semantic codebook indices into autoregressive BPE ids.
+
+        Args:
+            semantic_indices: Semantic token indices of shape ``(B,)`` or ``(B, S)``.
+            max_length: Maximum number of BPE tokens to generate.
+            bos_token_id: Token id used as first autoregressive token.
+            eos_token_id: Optional early-stop token id.
+
+        Returns:
+            Tensor of generated BPE token ids with shape ``(B, L)``.
+
+        Raises:
+            ValueError: If semantic index tensor rank is invalid or max_length < 1.
+        """
+        if int(max_length) < 1:
+            raise ValueError("max_length must be >= 1.")
         if semantic_indices.dim() == 1:
             semantic_indices = semantic_indices.unsqueeze(1)
         if semantic_indices.dim() != 2:
             raise ValueError("semantic_indices must have shape (B,) or (B, S).")
 
-        codebook = self.quantizer.codebook(semantic_indices.long())
-        memory = codebook.mean(dim=1, keepdim=True)
+        semantic_features = self.quantizer.codebook(semantic_indices.long())
+        memory = semantic_features.mean(dim=1, keepdim=True)
 
         batch_size = semantic_indices.shape[0]
         generated = torch.full(
@@ -107,7 +123,7 @@ class SemanticTextVQVAE(nn.Module):
             device=semantic_indices.device,
         )
 
-        for _ in range(max(1, int(max_length)) - 1):
+        for _ in range(int(max_length) - 1):
             tgt_emb = self.embedding(generated)
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(
                 generated.size(1),

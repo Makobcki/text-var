@@ -81,14 +81,12 @@ class TextVARPipeline:
         padding_mask = ~encoded["attention_mask"].bool().to(self._device)
 
         latent_context, _ = self._vqvae.encode_sentence(bpe_tokens, padding_mask=padding_mask)
-
-        # Current generator implementation starts from priors and does not consume prefix latents directly,
-        # so we keep context available for future conditioned decoding support.
-        _ = latent_context
+        semantic_prefix = latent_context.view(latent_context.shape[0], -1).long()
         generated_levels = hybrid_cascade_decode(
             self._var_model,
             batch_size=bpe_tokens.shape[0],
             device=self._device,
+            prefix_inputs=[semantic_prefix],
         )
 
         decoded_bpe = self._vqvae.decode_from_semantic_indices(
@@ -163,8 +161,8 @@ class TextVARPipeline:
         state_dict: dict[str, Any] = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
 
         cfg = VARConfig()
-        if isinstance(payload, dict) and "config" in payload:
-            cfg = VARConfig(**payload["config"])
+        if isinstance(payload, dict) and "model_config" in payload:
+            cfg = VARConfig.from_dict(dict(payload["model_config"]))
         model = VARTransformer(cfg)
         model.load_state_dict(state_dict, strict=False)
         for param in model.parameters():
