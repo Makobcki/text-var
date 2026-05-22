@@ -82,6 +82,7 @@ class TrainConfig:
     optimizer: Literal["adamw", "adamw8bit"] = "adamw"
     resume_from: Optional[Path] = None
     validation_every: int = 0
+    val_every: int = 0
     validation_batches: int = 8
     validation_split: float = 0.0
     val_token_cache_path: Optional[Path] = None
@@ -162,6 +163,7 @@ def load_train_config(path: Path) -> TrainConfig:
         optimizer=str(data.get("optimizer", "adamw")).lower(),
         resume_from=Path(data["resume_from"]) if data.get("resume_from") else None,
         validation_every=int(data.get("validation_every", 0)),
+        val_every=int(data.get("val_every", data.get("validation_every", 0))),
         validation_batches=int(data.get("validation_batches", 8)),
         validation_split=float(data.get("validation_split", 0.0)),
         val_token_cache_path=Path(data["val_token_cache_path"]) if data.get("val_token_cache_path") else None,
