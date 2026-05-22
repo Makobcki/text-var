@@ -75,6 +75,7 @@ class TrainConfig:
     grad_accum_steps: int = 1
     flash_cross_entropy: bool = True
     use_early_exit_loss: bool = False
+    optimizer: Literal["adamw", "adamw8bit"] = "adamw"
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def load_train_config(path: Path) -> TrainConfig:
         grad_accum_steps=max(1, int(data.get("grad_accum_steps", 1))),
         flash_cross_entropy=bool(data.get("flash_cross_entropy", True)),
         use_early_exit_loss=bool(data.get("use_early_exit_loss", False)),
+        optimizer=str(data.get("optimizer", "adamw")).lower(),
     )
 
 

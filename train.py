@@ -1,4 +1,5 @@
-from __future__ import annotations
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
 import random
@@ -138,9 +139,25 @@ def run_training(cfg: TrainConfig) -> Path:
         else:
             print("[TRAIN] torch.compile requested but unavailable in this PyTorch build.")
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
-    )
+    if cfg.optimizer == "adamw8bit":
+        try:
+            import bitsandbytes as bnb
+        except ImportError as exc:
+            raise ImportError(
+                "optimizer=adamw8bit requires bitsandbytes. Install with `pip install bitsandbytes`."
+            ) from exc
+
+        optimizer = bnb.optim.PagedAdamW8bit(
+            model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+        )
+        print("[TRAIN] optimizer=adamw8bit (bitsandbytes)")
+    elif cfg.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+        )
+        print("[TRAIN] optimizer=adamw")
+    else:
+        raise ValueError(f"Unsupported optimizer: {cfg.optimizer}")
 
     dataset = _build_dataset(cfg)
     dataloader = DataLoader(
