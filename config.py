@@ -21,6 +21,7 @@ class VARConfig:
     exit_layers: tuple[int, ...] = (4, 8, 12)  # Слои Early Exit
     pad_token_id: int = 0
     mask_token_id: int = 1  # Используется для NAR генерации
+    gradient_checkpointing: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VARConfig":
@@ -34,6 +35,7 @@ class VARConfig:
             exit_layers=tuple(int(v) for v in data.get("exit_layers", (4, 8, 12))),
             pad_token_id=int(data.get("pad_token_id", 0)),
             mask_token_id=int(data.get("mask_token_id", 1)),
+            gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
