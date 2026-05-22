@@ -88,6 +88,14 @@ class TrainConfig:
     synthetic_val_count: int = 256
     tensorboard_enabled: bool = False
     log_dir: Path = Path("runs/var")
+    log_grad_norm_every: int = 0
+    log_weight_norm_every: int = 0
+    sample_every: int = 0
+    sample_prompt: str = "The story begins"
+    sample_max_new_tokens: int = 96
+    wandb_enabled: bool = False
+    wandb_project: str = "text-var"
+    wandb_run_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +168,14 @@ def load_train_config(path: Path) -> TrainConfig:
         synthetic_val_count=int(data.get("synthetic_val_count", 256)),
         tensorboard_enabled=bool(data.get("tensorboard_enabled", False)),
         log_dir=Path(data.get("log_dir", "runs/var")),
+        log_grad_norm_every=max(0, int(data.get("log_grad_norm_every", 0))),
+        log_weight_norm_every=max(0, int(data.get("log_weight_norm_every", 0))),
+        sample_every=max(0, int(data.get("sample_every", 0))),
+        sample_prompt=str(data.get("sample_prompt", "The story begins")),
+        sample_max_new_tokens=max(1, int(data.get("sample_max_new_tokens", 96))),
+        wandb_enabled=bool(data.get("wandb_enabled", False)),
+        wandb_project=str(data.get("wandb_project", "text-var")),
+        wandb_run_name=str(data["wandb_run_name"]) if data.get("wandb_run_name") else None,
     )
 
 
