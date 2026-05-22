@@ -100,12 +100,12 @@ def _parallel_block_draft(
             cfg_scale=cfg_scale,
             compact_memory_for_final_level=True,
         )
-        sampled, _, chaos = thermodynamic_sampling_with_stats(
+        sampled, _, chaos_diff = thermodynamic_sampling_with_stats(
             logits.view(-1, logits.shape[-1]),
             alpha=alpha,
             healthy_entropy_limit=healthy_entropy_limit,
         )
-        if float((chaos > 0).float().mean().detach().cpu()) > float(rollback_chaos_threshold):
+        if float(chaos_diff.mean().item()) > float(rollback_chaos_threshold):
             raise RollbackEvent(start_idx, end_idx)
         lvl_2_tokens[:, start_idx:end_idx] = sampled.view(batch_size, block_len)
     return lvl_2_tokens
@@ -184,6 +184,7 @@ def hybrid_cascade_decode(
     *,
     batch_size: int,
     device: torch.device,
+    prefix_inputs: list[torch.Tensor] | None = None,
     nar_steps: int = 4,
     cfg_scale: float = 1.0,
     alpha: float = 1.0,
@@ -194,11 +195,36 @@ def hybrid_cascade_decode(
 
     batch = int(batch_size)
     out: list[torch.Tensor] = []
+    conditioned_prefixes = prefix_inputs or []
+
+    for level_idx, level_tokens in enumerate(conditioned_prefixes):
+        if level_idx >= len(model.cfg.level_lengths):
+            break
+        expected_len = int(model.cfg.level_lengths[level_idx])
+        if level_tokens.dim() != 2:
+            raise ValueError(f"prefix_inputs[{level_idx}] must be rank-2 tensor with shape (B, L).")
+        if level_tokens.shape[0] != batch:
+            raise ValueError(
+                f"prefix_inputs[{level_idx}] batch mismatch: expected {batch}, got {level_tokens.shape[0]}."
+            )
+        if level_tokens.shape[1] > expected_len:
+            raise ValueError(
+                f"prefix_inputs[{level_idx}] length exceeds level capacity "
+                f"({level_tokens.shape[1]} > {expected_len})."
+            )
+        out.append(level_tokens.to(device))
 
     len_lvl_0 = model.cfg.level_lengths[0]
-    print(f"[HYBRID] Фаза 1: AR Генерация макро-плана ({len_lvl_0} шагов)...")
-    lvl_0_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
-    for _ in range(len_lvl_0):
+    if len(out) < 1:
+        print(f"[HYBRID] Фаза 1: AR Генерация макро-плана ({len_lvl_0} шагов)...")
+        lvl_0_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
+    else:
+        lvl_0_sequence = out[0]
+        print(
+            "[HYBRID] Фаза 1: AR продолжение макро-плана "
+            f"(prefix={lvl_0_sequence.shape[1]}, target={len_lvl_0})..."
+        )
+    for _ in range(lvl_0_sequence.shape[1], len_lvl_0):
         next_token, _, _ = _decode_next_ar_token(
             model,
             prefix_inputs=[],
@@ -209,15 +235,25 @@ def hybrid_cascade_decode(
             healthy_entropy_limit=healthy_entropy_limit,
         )
         lvl_0_sequence = torch.cat([lvl_0_sequence, next_token.unsqueeze(1)], dim=1)
-    out.append(lvl_0_sequence)
+    if len(out) < 1:
+        out.append(lvl_0_sequence)
+    else:
+        out[0] = lvl_0_sequence
 
     len_lvl_1 = model.cfg.level_lengths[1]
-    print(f"[HYBRID] Фаза 2: AR Генерация структурного каркаса ({len_lvl_1} шагов)...")
-    lvl_1_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
-    for _ in range(len_lvl_1):
+    if len(out) < 2:
+        print(f"[HYBRID] Фаза 2: AR Генерация структурного каркаса ({len_lvl_1} шагов)...")
+        lvl_1_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
+    else:
+        lvl_1_sequence = out[1]
+        print(
+            "[HYBRID] Фаза 2: AR продолжение структурного каркаса "
+            f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
+        )
+    for _ in range(lvl_1_sequence.shape[1], len_lvl_1):
         next_token, _, _ = _decode_next_ar_token(
             model,
-            prefix_inputs=out,
+            prefix_inputs=[out[0]],
             target_level=1,
             sequence=lvl_1_sequence,
             cfg_scale=cfg_scale,
@@ -225,7 +261,10 @@ def hybrid_cascade_decode(
             healthy_entropy_limit=healthy_entropy_limit,
         )
         lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)
-    out.append(lvl_1_sequence)
+    if len(out) < 2:
+        out.append(lvl_1_sequence)
+    else:
+        out[1] = lvl_1_sequence
 
     len_lvl_2 = model.cfg.level_lengths[2]
     min_block = max(1, int(min_block_size_lvl2))
