@@ -4,6 +4,7 @@ import random
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 from config import VARConfig
@@ -14,6 +15,7 @@ def _collect_rng_state() -> dict[str, Any]:
     state: dict[str, Any] = {
         "torch": torch.random.get_rng_state(),
         "python": random.getstate(),
+        "numpy": np.random.get_state(),
     }
     if torch.cuda.is_available():
         state["cuda"] = torch.cuda.get_rng_state_all()
@@ -25,6 +27,8 @@ def _restore_rng_state(state: dict[str, Any]) -> None:
         torch.random.set_rng_state(state["torch"])
     if "python" in state:
         random.setstate(state["python"])
+    if "numpy" in state:
+        np.random.set_state(state["numpy"])
     if "cuda" in state and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state["cuda"])
 
