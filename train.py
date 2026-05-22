@@ -158,42 +158,39 @@ def apply_phase_freezing(model: VARTransformer, phase_idx: int) -> None:
 
 
 @torch.no_grad()
-def run_validation(
+def evaluate(
     model: VARTransformer,
     dataloader: DataLoader,
     cfg: TrainConfig,
     device: torch.device,
-    amp_dtype: torch.dtype,
-    amp_enabled: bool,
-) -> tuple[float, float]:
+    max_batches: int = 50,
+) -> float:
     model.eval()
     total_loss = 0.0
     total_batches = 0
-    max_batches = max(1, int(cfg.validation_batches))
     for batch_idx, batch in enumerate(dataloader):
-        if batch_idx >= max_batches:
+        if batch_idx >= max(1, int(max_batches)):
             break
         non_blocking = bool(cfg.pin_memory) and device.type == "cuda"
         moved_tokens = [t.to(device, non_blocking=non_blocking) for t in batch]
-        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+        with torch.autocast(
+            device_type=device.type,
+            dtype=_resolve_amp_dtype(cfg.amp_dtype),
+            enabled=bool(cfg.amp_enabled),
+        ):
             loss = multiscale_next_scale_cross_entropy(
                 model,
                 moved_tokens,
                 level_weights=cfg.level_weights,
-                corruption_level_idx=cfg.corruption_level_idx,
-                corruption_prob=cfg.corruption_prob,
-                corruption_span_min=cfg.corruption_span_min,
-                corruption_span_max=cfg.corruption_span_max,
-                masked_loss_weight=cfg.masked_loss_weight,
-                use_early_exit_loss=cfg.use_early_exit_loss,
+                corruption_level_idx=-1,
+                corruption_prob=0.0,
+                use_early_exit_loss=False,
             )
         total_loss += float(loss.detach().cpu())
         total_batches += 1
 
     model.train()
-    mean_loss = total_loss / max(1, total_batches)
-    perplexity = math.exp(min(20.0, mean_loss))
-    return mean_loss, perplexity
+    return total_loss / max(1, total_batches)
 
 
 def run_training(cfg: TrainConfig) -> Path:
@@ -305,15 +302,37 @@ def run_training(cfg: TrainConfig) -> Path:
     grad_accum_steps = max(1, int(cfg.grad_accum_steps))
 
     step = 0
+    current_phase = 0
     if cfg.resume_from is not None:
         loaded_model, payload = load_checkpoint(cfg.resume_from, device=device)
         model.load_state_dict(loaded_model.state_dict())
         restore_training_state(payload, optimizer=optimizer, scaler=scaler, scheduler=scheduler)
         step = int(payload.get("step", 0))
+        current_phase = min(
+            len(cfg.phase_steps) - 1,
+            sum(1 for phase_limit in cfg.phase_steps[:-1] if step >= int(phase_limit)),
+        )
         print(f"[TRAIN] resumed from checkpoint={cfg.resume_from} step={step}")
+    elif cfg.checkpoint_path.exists():
+        print(f"[TRAIN] Найден чекпоинт: {cfg.checkpoint_path}. Восстанавливаем состояние...")
+        loaded_model, payload = load_checkpoint(cfg.checkpoint_path, device=device)
+        model.load_state_dict(loaded_model.state_dict())
+        restore_training_state(payload, optimizer=optimizer, scaler=scaler, scheduler=scheduler)
+        step = int(payload.get('step', 0))
+        phase_boundaries = [0]
+        for phase_steps in cfg.phase_steps:
+            phase_boundaries.append(phase_boundaries[-1] + int(phase_steps))
+        current_phase = 0
+        for idx in range(len(phase_boundaries) - 1):
+            if phase_boundaries[idx] <= step < phase_boundaries[idx + 1]:
+                current_phase = idx
+                break
+        else:
+            current_phase = len(cfg.phase_steps) - 1
+        print(f"[TRAIN] Успешно продолжено с шага {step}")
     last_loss = 0.0
-    accumulated_steps_per_phase = 0
-    current_phase = 0
+    phase_start = sum(int(phase_steps) for phase_steps in cfg.phase_steps[:current_phase])
+    accumulated_steps_per_phase = max(0, step - phase_start)
     micro_step = 0
     apply_phase_freezing(model, current_phase)
 
@@ -406,8 +425,16 @@ def run_training(cfg: TrainConfig) -> Path:
                     if wandb_run is not None:
                         wandb_run.log({"train/weight_norm_l2": weight_norm}, step=step)
 
-                if val_dataloader is not None and step % int(cfg.validation_every) == 0:
-                    val_loss, val_ppl = run_validation(model, val_dataloader, cfg, device, amp_dtype, amp_enabled)
+                val_every = int(getattr(cfg, "val_every", 0)) or int(cfg.validation_every) or int(cfg.save_every)
+                if val_dataloader is not None and val_every > 0 and step % val_every == 0:
+                    val_loss = evaluate(
+                        model,
+                        val_dataloader,
+                        cfg,
+                        device,
+                        max_batches=int(cfg.validation_batches),
+                    )
+                    val_ppl = math.exp(min(20.0, val_loss))
                     print(f"[VAL] step={step} val_loss={val_loss:.6f} perplexity={val_ppl:.4f}")
                     if writer:
                         writer.add_scalar("val/loss", val_loss, step)
