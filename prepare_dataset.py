@@ -6,42 +6,71 @@ import os
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
-import binascii
-
 import torch
+from transformers import AutoTokenizer
 from tqdm import tqdm
 
 from token_cache import TokenCacheMetadata
 
-
-def _stable_u64(data: bytes) -> int:
-    """Легкий специализированный 64-битный хеш для генерации ID (CRC32x2)."""
-    lo = binascii.crc32(data) & 0xFFFFFFFF
-    hi = binascii.crc32(data, 0x9E3779B9) & 0xFFFFFFFF
-    return (hi << 32) | lo
+_WORKER_TOKENIZERS: dict[tuple[str, bool], object] = {}
 
 
-def _encode_scale(tokens: list[str], *, length: int, vocab_size: int, prefix: str) -> list[int]:
-    # Оптимизация: убираем создание torch.tensor внутри воркера.
-    # Возвращаем чистый питоновский list[int]. Это снижает оверхед на сериализацию в multiprocessing.
-    out = [0] * length
-    sub_tokens = tokens[:length]
-    for idx, tok in enumerate(sub_tokens):
-        salt = f"{prefix}::{idx}::{tok}".encode("utf-8")
-        out[idx] = _stable_u64(salt) % vocab_size
+def _get_tokenizer(tokenizer_name: str, use_fast: bool):
+    key = (tokenizer_name, use_fast)
+    tok = _WORKER_TOKENIZERS.get(key)
+    if tok is None:
+        tok = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=use_fast)
+        _WORKER_TOKENIZERS[key] = tok
+    return tok
 
-    for idx in range(len(sub_tokens), length):
-        pad_tok = f"<pad:{idx}>".encode("utf-8")
-        salt = f"{prefix}::{idx}::{pad_tok}".encode("utf-8")
-        out[idx] = _stable_u64(salt) % vocab_size
 
-    return out
+def _fit_to_level(token_ids: list[int], *, length: int, vocab_size: int, pad_id: int = 0) -> list[int]:
+    """Truncate/pad token sequence and clamp ids into target vocab range."""
+    if vocab_size <= 1:
+        raise ValueError("vocab_size must be > 1 for real tokenizer pipeline")
+
+    overflow_id = vocab_size - 1
+    clipped = [tok if 0 <= tok < vocab_size else overflow_id for tok in token_ids[:length]]
+    if len(clipped) < length:
+        clipped.extend([pad_id] * (length - len(clipped)))
+    return clipped
+
+
+def _downsample(token_ids: list[int], stride: int) -> list[int]:
+    if stride <= 1:
+        return token_ids
+    return token_ids[::stride]
+
+
+def _encode_multiscale(
+    token_ids: list[int], *, level_lengths: tuple[int, ...], level_vocab_sizes: tuple[int, ...]
+) -> list[list[int]]:
+    if len(level_lengths) != 3 or len(level_vocab_sizes) != 3:
+        raise ValueError("This pipeline expects exactly 3 token levels.")
+
+    # Coarse -> medium -> fine levels from a single BPE/WordPiece stream.
+    lvl0 = _fit_to_level(
+        _downsample(token_ids, 4),
+        length=level_lengths[0],
+        vocab_size=level_vocab_sizes[0],
+    )
+    lvl1 = _fit_to_level(
+        _downsample(token_ids, 2),
+        length=level_lengths[1],
+        vocab_size=level_vocab_sizes[1],
+    )
+    lvl2 = _fit_to_level(
+        token_ids,
+        length=level_lengths[2],
+        vocab_size=level_vocab_sizes[2],
+    )
+    return [lvl0, lvl1, lvl2]
 
 
 def process_single_line(
-    args_tuple: tuple[str, int, tuple[int, ...], tuple[int, ...]],
+    args_tuple: tuple[str, int, tuple[int, ...], tuple[int, ...], str, bool],
 ) -> dict[str, object]:
-    line, index, level_lengths, level_vocab_sizes = args_tuple
+    line, index, level_lengths, level_vocab_sizes, tokenizer_name, use_fast = args_tuple
 
     payload = json.loads(line)
     text = str(payload.get("content", payload.get("text", ""))).strip()
@@ -53,26 +82,18 @@ def process_single_line(
             "bytes_processed": len(line.encode("utf-8")),
         }
 
-    words = text.split()
-    chars = list(text)
+    tokenizer = _get_tokenizer(tokenizer_name, use_fast)
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
 
-    lvl0 = _encode_scale(
-        words,
-        length=level_lengths[0],
-        vocab_size=level_vocab_sizes[0],
-        prefix="lvl0",
-    )
-    lvl1 = _encode_scale(
-        words + chars,
-        length=level_lengths[1],
-        vocab_size=level_vocab_sizes[1],
-        prefix="lvl1",
-    )
-    lvl2 = _encode_scale(
-        chars,
-        length=level_lengths[2],
-        vocab_size=level_vocab_sizes[2],
-        prefix="lvl2",
+    if not token_ids:
+        return {
+            "id": str(index),
+            "tokens": None,
+            "bytes_processed": len(line.encode("utf-8")),
+        }
+
+    lvl0, lvl1, lvl2 = _encode_multiscale(
+        token_ids, level_lengths=level_lengths, level_vocab_sizes=level_vocab_sizes
     )
 
     return {
@@ -96,6 +117,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--level-vocab-sizes", type=int, nargs=3, default=(4096, 2048, 32000))
     parser.add_argument("--level-lengths", type=int, nargs=3, default=(32, 128, 1024))
     parser.add_argument("--codebook-dim", type=int, default=256)
+    parser.add_argument("--tokenizer-name", type=str, default="bert-base-uncased")
+    parser.add_argument("--slow-tokenizer", action="store_true", help="Use python tokenizer instead of fast backend.")
     parser.add_argument(
         "--num-workers",
         type=int,
@@ -144,6 +167,8 @@ def main(argv: list[str] | None = None) -> None:
                         idx,
                         metadata.level_lengths,
                         metadata.level_vocab_sizes,
+                        args.tokenizer_name,
+                        not args.slow_tokenizer,
                     )
 
             pbar = tqdm(
