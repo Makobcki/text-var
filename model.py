@@ -154,6 +154,26 @@ class VARTransformer(nn.Module):
         invalid = (col - row).abs() > radius
         return invalid.view(1, 1, seq_len, seq_len)
 
+    def _build_prefix_self_attention_mask(
+        self,
+        seq_len: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Build a local self-attention mask for prefix encoding.
+
+        Args:
+            seq_len: Prefix token sequence length.
+            device: Device where the mask should be allocated.
+
+        Returns:
+            Local bidirectional mask for SDPA when configured and meaningful,
+            otherwise ``None`` to allow dense attention kernels.
+        """
+        local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
+        if local_radius <= 0 or seq_len <= 1:
+            return None
+        return self._make_local_bidirectional_mask(seq_len, local_radius, device)
+
     def forward(
         self,
         prefix_inputs: list[torch.Tensor],
@@ -204,12 +224,7 @@ class VARTransformer(nn.Module):
 
             x_scale = emb
             use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
-            local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
-            prefix_mask = (
-                self._make_local_bidirectional_mask(l, local_radius, device)
-                if local_radius > 0 and l > 1
-                else None
-            )
+            prefix_mask = self._build_prefix_self_attention_mask(l, device)
             for block in self.blocks:
                 if use_ckpt:
                     x_scale = checkpoint(

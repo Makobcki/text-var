@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -35,33 +37,28 @@ def multiscale_next_scale_cross_entropy(
     masked_loss_weight: float = 0.85,
     use_early_exit_loss: bool = False,
 ) -> torch.Tensor:
-    def _build_span_mask(batch: int, seq_len: int, prob: float, min_span: int, max_span: int, device: torch.device) -> torch.Tensor:
+    def _build_span_mask(
+        batch: int,
+        seq_len: int,
+        prob: float,
+        min_span: int,
+        max_span: int,
+        device: torch.device,
+    ) -> torch.Tensor:
         if prob <= 0.0 or seq_len <= 0:
-            return torch.zeros((batch, seq_len), dtype=torch.bool, device=device)
-
-        starts = torch.rand((batch, seq_len), device=device) < float(prob)
-        if not starts.any():
             return torch.zeros((batch, seq_len), dtype=torch.bool, device=device)
 
         span_lo = max(1, min(int(min_span), seq_len))
         span_hi = max(span_lo, min(int(max_span), seq_len))
+        mean_span = max(1.0, float(span_lo + span_hi) / 2.0)
+        clipped_prob = min(max(float(prob), 1e-5), 1.0 - 1e-5)
+        num_spans = int(math.ceil(-seq_len / mean_span * math.log(1.0 - clipped_prob)))
+        num_spans = max(1, num_spans)
 
-        spans = torch.randint(span_lo, span_hi + 1, (batch, seq_len), device=device)
-        end_idx = torch.arange(seq_len, device=device).unsqueeze(0) + spans
-        end_idx = torch.clamp(end_idx, max=seq_len)
-
-        delta = torch.zeros((batch, seq_len + 1), dtype=torch.int32, device=device)
-        start_pos = starts.nonzero(as_tuple=False)
-        if start_pos.numel() == 0:
-            return torch.zeros((batch, seq_len), dtype=torch.bool, device=device)
-        b_idx = start_pos[:, 0]
-        s_idx = start_pos[:, 1]
-        e_idx = end_idx[b_idx, s_idx]
-
-        delta[b_idx, s_idx] += 1
-        delta[b_idx, e_idx] -= 1
-        active = torch.cumsum(delta[:, :-1], dim=1)
-        return active > 0
+        starts = torch.randint(0, seq_len, (batch, num_spans, 1), device=device)
+        lengths = torch.randint(span_lo, span_hi + 1, (batch, num_spans, 1), device=device)
+        positions = torch.arange(seq_len, device=device).view(1, 1, -1)
+        return ((positions >= starts) & (positions < starts + lengths)).any(dim=1)
 
     scale_losses = []
     batch_size = moved_tokens[0].size(0)
