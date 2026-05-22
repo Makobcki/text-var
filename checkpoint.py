@@ -37,6 +37,7 @@ def save_checkpoint(
     step: int,
     loss: float,
     scaler: torch.amp.GradScaler | None = None,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
 ) -> None:
     ckpt_path = Path(path)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,6 +54,8 @@ def save_checkpoint(
         payload["optimizer"] = optimizer.state_dict()
     if scaler is not None:
         payload["scaler"] = scaler.state_dict()
+    if scheduler is not None:
+        payload["scheduler"] = scheduler.state_dict()
     torch.save(payload, ckpt_path)
 
 
@@ -70,12 +73,18 @@ def load_checkpoint(path: str | Path, *, device: torch.device) -> tuple[VARTrans
 
 
 def restore_training_state(
-    payload: dict[str, Any], *, optimizer: torch.optim.Optimizer | None = None, scaler: torch.amp.GradScaler | None = None
+    payload: dict[str, Any],
+    *,
+    optimizer: torch.optim.Optimizer | None = None,
+    scaler: torch.amp.GradScaler | None = None,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
 ) -> None:
     if optimizer is not None and "optimizer" in payload:
         optimizer.load_state_dict(payload["optimizer"])
     if scaler is not None and "scaler" in payload:
         scaler.load_state_dict(payload["scaler"])
+    if scheduler is not None and "scheduler" in payload:
+        scheduler.load_state_dict(payload["scheduler"])
     rng_state = payload.get("rng_state")
     if isinstance(rng_state, dict):
         _restore_rng_state(rng_state)
