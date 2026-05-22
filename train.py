@@ -202,6 +202,7 @@ def run_training(cfg: TrainConfig) -> Path:
                     corruption_span_min=cfg.corruption_span_min,
                     corruption_span_max=cfg.corruption_span_max,
                     masked_loss_weight=cfg.masked_loss_weight,
+                    use_early_exit_loss=cfg.use_early_exit_loss,
                 )
 
             scaled_loss = loss / grad_accum_steps

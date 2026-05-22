@@ -74,6 +74,7 @@ class TrainConfig:
     pin_memory: bool = True
     grad_accum_steps: int = 1
     flash_cross_entropy: bool = True
+    use_early_exit_loss: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,7 @@ def load_train_config(path: Path) -> TrainConfig:
         pin_memory=bool(data.get("pin_memory", True)),
         grad_accum_steps=max(1, int(data.get("grad_accum_steps", 1))),
         flash_cross_entropy=bool(data.get("flash_cross_entropy", True)),
+        use_early_exit_loss=bool(data.get("use_early_exit_loss", False)),
     )
 
 
