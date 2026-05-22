@@ -83,6 +83,45 @@ class SemanticTextVQVAE(nn.Module):
         _, vq_loss, semantic_idx = self.quantizer(sentence_vector)
         return semantic_idx, vq_loss
 
+    def decode_from_semantic_indices(
+        self,
+        semantic_indices: torch.Tensor,
+        *,
+        max_length: int,
+        bos_token_id: int,
+        eos_token_id: int | None = None,
+    ) -> torch.Tensor:
+        if semantic_indices.dim() == 1:
+            semantic_indices = semantic_indices.unsqueeze(1)
+        if semantic_indices.dim() != 2:
+            raise ValueError("semantic_indices must have shape (B,) or (B, S).")
+
+        codebook = self.quantizer.codebook(semantic_indices.long())
+        memory = codebook.mean(dim=1, keepdim=True)
+
+        batch_size = semantic_indices.shape[0]
+        generated = torch.full(
+            (batch_size, 1),
+            int(bos_token_id),
+            dtype=torch.long,
+            device=semantic_indices.device,
+        )
+
+        for _ in range(max(1, int(max_length)) - 1):
+            tgt_emb = self.embedding(generated)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
+                generated.size(1),
+                device=generated.device,
+            )
+            decoded = self.decoder(tgt=tgt_emb, memory=memory, tgt_mask=tgt_mask)
+            logits = self.lm_head(decoded)
+            next_token = logits[:, -1, :].argmax(dim=-1)
+            generated = torch.cat([generated, next_token.unsqueeze(1)], dim=1)
+            if eos_token_id is not None and bool((next_token == int(eos_token_id)).all()):
+                break
+
+        return generated
+
     # TASK-4: Реализация сквозного forward-цикла восстановления с расчетом лосса
     def forward(
         self, bpe_tokens: torch.Tensor, padding_mask: torch.Tensor | None = None
