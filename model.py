@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from config import VARConfig
 
@@ -202,8 +203,19 @@ class VARTransformer(nn.Module):
             emb = emb + self.local_position_embedding(local_ids).view(1, l, -1)
 
             x_scale = emb
+            use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
             for block in self.blocks:
-                x_scale = block(tgt=x_scale, memory=current_context, self_attn_mask=None, self_is_causal=False)
+                if use_ckpt:
+                    x_scale = checkpoint(
+                        block,
+                        use_reentrant=False,
+                        tgt=x_scale,
+                        memory=current_context,
+                        self_attn_mask=None,
+                        self_is_causal=False,
+                    )
+                else:
+                    x_scale = block(tgt=x_scale, memory=current_context, self_attn_mask=None, self_is_causal=False)
 
             encoded = self.norm(x_scale)
             compress_tokens = self.cfg.level_lengths[max(0, s_idx - 1)] if compact_memory_for_final_level else encoded.shape[1]
@@ -233,8 +245,19 @@ class VARTransformer(nn.Module):
             self_mask = self._make_local_bidirectional_mask(target_len, window, device)
 
         early_outputs = []
+        use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
         for layer_idx, block in enumerate(self.blocks):
-            x = block(tgt=x, memory=final_memory, self_attn_mask=self_mask, self_is_causal=self_is_causal)
+            if use_ckpt:
+                x = checkpoint(
+                    block,
+                    use_reentrant=False,
+                    tgt=x,
+                    memory=final_memory,
+                    self_attn_mask=self_mask,
+                    self_is_causal=self_is_causal,
+                )
+            else:
+                x = block(tgt=x, memory=final_memory, self_attn_mask=self_mask, self_is_causal=self_is_causal)
             if layer_idx in self.cfg.exit_layers:
                 target_features = self.norm(x)
                 head_key = f"layer_{layer_idx}_scale_{target_idx}"
