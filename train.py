@@ -13,10 +13,12 @@ from config import TrainConfig, load_train_config
 from loss import multiscale_next_scale_cross_entropy  # Сюда перемещен лосс
 from model import VARTransformer
 from token_cache import (
+    MultiscaleTokenChunkIterableDataset,
     MultiscaleTokenDataset,
     TokenCacheMetadata,
     build_synthetic_token_entries,
     load_token_entries,
+    load_token_entries_from_directory,
     validate_tokenizer_metadata,
 )
 
@@ -54,8 +56,14 @@ def _is_amp_available(device: torch.device, amp_dtype: torch.dtype) -> bool:
         return True
     return torch.cuda.is_bf16_supported()
 
-def _build_dataset(cfg: TrainConfig) -> MultiscaleTokenDataset:
+def _build_dataset(cfg: TrainConfig):
     if cfg.token_cache_path is not None:
+        if cfg.token_cache_path.is_dir():
+            chunk_paths, actual_metadata = load_token_entries_from_directory(cfg.token_cache_path)
+            if cfg.token_metadata is not None:
+                validate_tokenizer_metadata(actual_metadata, cfg.token_metadata)
+            return MultiscaleTokenChunkIterableDataset(chunk_paths, actual_metadata)
+
         entries, actual_metadata = load_token_entries(cfg.token_cache_path)
         if cfg.token_metadata is not None:
             validate_tokenizer_metadata(actual_metadata, cfg.token_metadata)
@@ -138,7 +146,7 @@ def run_training(cfg: TrainConfig) -> Path:
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        shuffle=not isinstance(dataset, MultiscaleTokenChunkIterableDataset),
         collate_fn=_collate_tokens,
         pin_memory=bool(cfg.pin_memory),
     )

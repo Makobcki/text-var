@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset
 
 
 @dataclass(frozen=True)
@@ -133,6 +133,62 @@ def load_token_entries(path: str | Path) -> tuple[list[dict[str, object]], Token
     return entries, metadata
 
 
+def load_token_entries_from_directory(
+    path: str | Path,
+) -> tuple[list[Path], TokenCacheMetadata]:
+    root = Path(path)
+    if not root.is_dir():
+        raise ValueError(f"Token cache path must be a directory: {root}")
+
+    metadata_path = root / "metadata.json"
+    if not metadata_path.exists():
+        raise ValueError(f"Token cache metadata file not found: {metadata_path}")
+
+    metadata = load_token_cache_metadata(metadata_path)
+    chunk_paths = sorted(root.glob("tokens_chunk_*.pt"))
+    if not chunk_paths:
+        raise ValueError(f"No token chunk files found in {root}")
+    return chunk_paths, metadata
+
+
+class MultiscaleTokenChunkIterableDataset(IterableDataset):
+    def __init__(self, chunk_paths: list[Path], metadata: TokenCacheMetadata) -> None:
+        self.chunk_paths = list(chunk_paths)
+        self.metadata = metadata
+
+    def __iter__(self):
+        for chunk_path in self.chunk_paths:
+            payload = torch.load(chunk_path, map_location="cpu")
+            entries = payload.get("entries") if isinstance(payload, dict) else None
+            if not isinstance(entries, list):
+                raise ValueError(f"Chunk {chunk_path} must contain an entries list.")
+
+            for index, entry in enumerate(entries):
+                tokens = entry.get("tokens") if isinstance(entry, dict) else None
+                if not isinstance(tokens, list) or len(tokens) != len(self.metadata.level_lengths):
+                    raise ValueError(f"Token cache entry has invalid scale count in {chunk_path}.")
+
+                out = [torch.as_tensor(item, dtype=torch.long) for item in tokens]
+                for lvl_idx, (expected, vocab_size) in enumerate(
+                    zip(self.metadata.level_lengths, self.metadata.level_vocab_sizes)
+                ):
+                    item = out[lvl_idx]
+                    if item.numel() != expected:
+                        raise ValueError(
+                            f"Token level {lvl_idx} expected {expected} tokens, got {item.numel()}."
+                        )
+                    if item.numel() and (
+                        int(item.max().item()) >= vocab_size or int(item.min().item()) < 0
+                    ):
+                        raise ValueError("Token value outside tokenizer codebook.")
+
+                yield {
+                    "id": entry.get("id", f"{chunk_path.name}:{index}"),
+                    "tokens": out,
+                    "metadata": self.metadata,
+                }
+
+
 class MultiscaleTokenDataset(Dataset):
     def __init__(self, entries: list[dict[str, object]], metadata: TokenCacheMetadata) -> None:
         self.entries = list(entries)
@@ -187,9 +243,11 @@ def main(argv: list[str] | None = None) -> None:
 
 __all__ = [
     "MultiscaleTokenDataset",
+    "MultiscaleTokenChunkIterableDataset",
     "TokenCacheMetadata",
     "build_synthetic_token_entries",
     "load_token_cache_metadata",
+    "load_token_entries_from_directory",
     "load_token_entries",
     "save_token_cache_metadata",
     "validate_tokenizer_metadata",
