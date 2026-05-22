@@ -202,6 +202,27 @@ def run_training(cfg: TrainConfig) -> Path:
     else:
         raise ValueError(f"Unsupported optimizer: {cfg.optimizer}")
 
+    warmup_steps = int(cfg.max_steps * float(cfg.warmup_ratio))
+    warmup_steps = max(1, min(int(cfg.max_steps) - 1, warmup_steps)) if int(cfg.max_steps) > 1 else 0
+    min_lr_ratio = min(1.0, max(0.0, float(cfg.min_learning_rate_ratio)))
+
+    def _lr_lambda(current_step: int) -> float:
+        if int(cfg.max_steps) <= 1:
+            return 1.0
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return float(current_step + 1) / float(warmup_steps)
+        progress_denominator = max(1, int(cfg.max_steps) - warmup_steps)
+        progress = min(1.0, max(0.0, float(current_step - warmup_steps) / float(progress_denominator)))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
+    print(
+        "[TRAIN] scheduler=cosine_with_warmup "
+        f"warmup_steps={warmup_steps} "
+        f"min_lr={cfg.learning_rate * min_lr_ratio:.3e}"
+    )
+
     dataset = _build_dataset(cfg)
     dataloader = DataLoader(
         dataset,
@@ -241,7 +262,7 @@ def run_training(cfg: TrainConfig) -> Path:
     if cfg.resume_from is not None:
         loaded_model, payload = load_checkpoint(cfg.resume_from, device=device)
         model.load_state_dict(loaded_model.state_dict())
-        restore_training_state(payload, optimizer=optimizer, scaler=scaler)
+        restore_training_state(payload, optimizer=optimizer, scaler=scaler, scheduler=scheduler)
         step = int(payload.get("step", 0))
         print(f"[TRAIN] resumed from checkpoint={cfg.resume_from} step={step}")
     last_loss = 0.0
@@ -296,12 +317,14 @@ def run_training(cfg: TrainConfig) -> Path:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
                     scaler.step(optimizer)
                     scaler.update()
+                    scheduler.step()
             else:
                 scaled_loss.backward()
                 if should_step:
                     if float(cfg.grad_clip_norm) > 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
                     optimizer.step()
+                    scheduler.step()
 
             if should_step:
                 step += 1
@@ -310,6 +333,7 @@ def run_training(cfg: TrainConfig) -> Path:
                 print(f"[TRAIN] family=var phase={current_phase + 1} step={step}/{cfg.max_steps} loss={last_loss:.6f}")
                 if writer:
                     writer.add_scalar("train/loss", last_loss, step)
+                    writer.add_scalar("train/lr", float(scheduler.get_last_lr()[0]), step)
 
                 if val_dataloader is not None and step % int(cfg.validation_every) == 0:
                     val_loss, val_ppl = run_validation(model, val_dataloader, cfg, device, amp_dtype, amp_enabled)
@@ -319,14 +343,30 @@ def run_training(cfg: TrainConfig) -> Path:
                         writer.add_scalar("val/perplexity", val_ppl, step)
 
             if should_step and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
-                save_checkpoint(cfg.checkpoint_path, model=model, optimizer=optimizer, step=step, loss=last_loss, scaler=scaler)
+                save_checkpoint(
+                    cfg.checkpoint_path,
+                    model=model,
+                    optimizer=optimizer,
+                    step=step,
+                    loss=last_loss,
+                    scaler=scaler,
+                    scheduler=scheduler,
+                )
             if step >= int(cfg.max_steps):
                 break
 
         if not saw_batch:
             raise RuntimeError("VAR training dataloader produced no batches.")
 
-    save_checkpoint(cfg.checkpoint_path, model=model, optimizer=optimizer, step=step, loss=last_loss, scaler=scaler)
+    save_checkpoint(
+        cfg.checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        step=step,
+        loss=last_loss,
+        scaler=scaler,
+        scheduler=scheduler,
+    )
     if writer:
         writer.flush()
         writer.close()

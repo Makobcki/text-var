@@ -56,6 +56,8 @@ class TrainConfig:
     seed: int = 42
     batch_size: int = 4
     learning_rate: float = 1e-4
+    min_learning_rate_ratio: float = 0.1
+    warmup_ratio: float = 0.03
     weight_decay: float = 0.01
     max_steps: int = 10000
     grad_clip_norm: float = 1.0
@@ -126,6 +128,8 @@ def load_train_config(path: Path) -> TrainConfig:
         seed=int(data.get("seed", 42)),
         batch_size=int(data.get("batch_size", 4)),
         learning_rate=float(data.get("learning_rate", 1e-4)),
+        min_learning_rate_ratio=float(data.get("min_learning_rate_ratio", 0.1)),
+        warmup_ratio=float(data.get("warmup_ratio", 0.03)),
         weight_decay=float(data.get("weight_decay", 0.01)),
         max_steps=int(data.get("max_steps", 10000)),
         grad_clip_norm=float(data.get("grad_clip_norm", 1.0)),
