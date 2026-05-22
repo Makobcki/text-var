@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
-import shutil
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
+
+import binascii
 
 import torch
 from tqdm import tqdm
@@ -15,23 +15,25 @@ from token_cache import TokenCacheMetadata
 
 
 def _stable_u64(data: bytes) -> int:
-    digest = hashlib.blake2b(data, digest_size=8).digest()
-    return int.from_bytes(digest, byteorder="little", signed=False)
+    """Легкий специализированный 64-битный хеш для генерации ID (CRC32x2)."""
+    lo = binascii.crc32(data) & 0xFFFFFFFF
+    hi = binascii.crc32(data, 0x9E3779B9) & 0xFFFFFFFF
+    return (hi << 32) | lo
 
 
 def _encode_scale(tokens: list[str], *, length: int, vocab_size: int, prefix: str) -> list[int]:
     # Оптимизация: убираем создание torch.tensor внутри воркера.
     # Возвращаем чистый питоновский list[int]. Это снижает оверхед на сериализацию в multiprocessing.
-    out = []
+    out = [0] * length
     sub_tokens = tokens[:length]
     for idx, tok in enumerate(sub_tokens):
         salt = f"{prefix}::{idx}::{tok}".encode("utf-8")
-        out.append(_stable_u64(salt) % vocab_size)
+        out[idx] = _stable_u64(salt) % vocab_size
 
-    while len(out) < length:
-        pad_tok = f"<pad:{len(out)}>".encode("utf-8")
-        salt = f"{prefix}::{len(out)}::{pad_tok}".encode("utf-8")
-        out.append(_stable_u64(salt) % vocab_size)
+    for idx in range(len(sub_tokens), length):
+        pad_tok = f"<pad:{idx}>".encode("utf-8")
+        salt = f"{prefix}::{idx}::{pad_tok}".encode("utf-8")
+        out[idx] = _stable_u64(salt) % vocab_size
 
     return out
 
@@ -95,10 +97,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--level-lengths", type=int, nargs=3, default=(32, 128, 1024))
     parser.add_argument("--codebook-dim", type=int, default=256)
     parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=max(1, min(8, cpu_count() - 1)),
+        help="Worker processes (cap to reduce RAM pressure).",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
-        default=50000,
-        help="How many samples per chunk file.",
+        default=4000,
+        help="How many samples per chunk file (lower = less RAM).",
     )
 
     args = parser.parse_args(argv)
@@ -112,7 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     total_bytes = os.path.getsize(args.input)
-    num_workers = max(1, cpu_count() - 1)
+    num_workers = int(args.num_workers)
     print(f"Запуск параллельной токенизации на {num_workers} ядрах CPU...")
 
     # Создаем чистую целевую папку
@@ -148,12 +156,11 @@ def main(argv: list[str] | None = None) -> None:
 
             # Использование pool.imap гарантирует сохранение порядка (индексы идут строго вверх)
             # Благодаря этому нам больше не нужна финальная тяжелая сортировка .sort()
-            for result in pool.imap(process_single_line, argument_generator(), chunksize=250):
+            for result in pool.imap(process_single_line, argument_generator(), chunksize=256):
                 pbar.update(result["bytes_processed"])
 
                 if result["tokens"] is not None:
-                    # Превращаем в тензоры прямо перед упаковкой батча
-                    tensor_tokens = [torch.tensor(t, dtype=torch.long) for t in result["tokens"]]
+                    tensor_tokens = [torch.tensor(t, dtype=torch.int32) for t in result["tokens"]]
                     current_batch.append({"id": result["id"], "tokens": tensor_tokens})
                     total_saved_docs += 1
 
