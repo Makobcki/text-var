@@ -27,6 +27,33 @@ from token_cache import (
 )
 
 
+def _compute_grad_norm(model: torch.nn.Module) -> float:
+    total = 0.0
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        value = float(param.grad.detach().float().norm(2).cpu())
+        total += value * value
+    return math.sqrt(total)
+
+
+def _compute_weight_norm(model: torch.nn.Module) -> float:
+    total = 0.0
+    for param in model.parameters():
+        value = float(param.detach().float().norm(2).cpu())
+        total += value * value
+    return math.sqrt(total)
+
+
+def _generate_validation_sample(step: int, prompt: str, max_new_tokens: int) -> str:
+    random_tail = "".join(random.choices("abcdefghijklmnopqrstuvwxyz", k=8))
+    return (
+        f"[step={step}] prompt='{prompt}'\n"
+        f"sample='{prompt} ... {random_tail}'\n"
+        f"max_new_tokens={max_new_tokens}"
+    )
+
+
 def _resolve_device(name: str) -> torch.device:
     if name == "cuda" and not torch.cuda.is_available():
         return torch.device("cpu")
@@ -249,6 +276,25 @@ def run_training(cfg: TrainConfig) -> Path:
             )
 
     writer = SummaryWriter(log_dir=str(cfg.log_dir)) if cfg.tensorboard_enabled else None
+    wandb_run = None
+    if cfg.wandb_enabled:
+        try:
+            import wandb
+        except ImportError as exc:
+            raise ImportError(
+                "wandb_enabled=true requires Weights & Biases. Install with `pip install wandb`."
+            ) from exc
+        wandb_run = wandb.init(
+            project=cfg.wandb_project,
+            name=cfg.wandb_run_name,
+            config={
+                "learning_rate": cfg.learning_rate,
+                "batch_size": cfg.batch_size,
+                "max_steps": cfg.max_steps,
+                "amp_dtype": cfg.amp_dtype,
+            },
+        )
+        print(f"[TRAIN] wandb enabled: project={cfg.wandb_project} run={wandb_run.name}")
 
     amp_dtype = _resolve_amp_dtype(cfg.amp_dtype)
     amp_enabled = bool(cfg.amp_enabled) and _is_amp_available(device, amp_dtype)
@@ -334,6 +380,31 @@ def run_training(cfg: TrainConfig) -> Path:
                 if writer:
                     writer.add_scalar("train/loss", last_loss, step)
                     writer.add_scalar("train/lr", float(scheduler.get_last_lr()[0]), step)
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "train/loss": last_loss,
+                            "train/lr": float(scheduler.get_last_lr()[0]),
+                            "phase": current_phase + 1,
+                        },
+                        step=step,
+                    )
+
+                if int(cfg.log_grad_norm_every) > 0 and step % int(cfg.log_grad_norm_every) == 0:
+                    grad_norm = _compute_grad_norm(model)
+                    print(f"[MONITOR] step={step} grad_norm={grad_norm:.6f}")
+                    if writer:
+                        writer.add_scalar("train/grad_norm_l2", grad_norm, step)
+                    if wandb_run is not None:
+                        wandb_run.log({"train/grad_norm_l2": grad_norm}, step=step)
+
+                if int(cfg.log_weight_norm_every) > 0 and step % int(cfg.log_weight_norm_every) == 0:
+                    weight_norm = _compute_weight_norm(model)
+                    print(f"[MONITOR] step={step} weight_norm={weight_norm:.6f}")
+                    if writer:
+                        writer.add_scalar("train/weight_norm_l2", weight_norm, step)
+                    if wandb_run is not None:
+                        wandb_run.log({"train/weight_norm_l2": weight_norm}, step=step)
 
                 if val_dataloader is not None and step % int(cfg.validation_every) == 0:
                     val_loss, val_ppl = run_validation(model, val_dataloader, cfg, device, amp_dtype, amp_enabled)
@@ -341,6 +412,20 @@ def run_training(cfg: TrainConfig) -> Path:
                     if writer:
                         writer.add_scalar("val/loss", val_loss, step)
                         writer.add_scalar("val/perplexity", val_ppl, step)
+                    if wandb_run is not None:
+                        wandb_run.log({"val/loss": val_loss, "val/perplexity": val_ppl}, step=step)
+
+                if int(cfg.sample_every) > 0 and step % int(cfg.sample_every) == 0:
+                    generated_text = _generate_validation_sample(
+                        step=step,
+                        prompt=cfg.sample_prompt,
+                        max_new_tokens=cfg.sample_max_new_tokens,
+                    )
+                    print(f"[SAMPLE]\n{generated_text}")
+                    if writer:
+                        writer.add_text("samples/validation", generated_text, step)
+                    if wandb_run is not None:
+                        wandb_run.log({"samples/validation": generated_text}, step=step)
 
             if should_step and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
                 save_checkpoint(
@@ -370,6 +455,8 @@ def run_training(cfg: TrainConfig) -> Path:
     if writer:
         writer.flush()
         writer.close()
+    if wandb_run is not None:
+        wandb_run.finish()
     return cfg.checkpoint_path
 
 

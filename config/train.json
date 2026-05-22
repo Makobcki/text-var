@@ -42,5 +42,14 @@
   "flash_cross_entropy": true,
   "gradient_checkpointing": true,
   "use_early_exit_loss": false,
-  "optimizer": "adamw"
+  "optimizer": "adamw",
+  "tensorboard_enabled": true,
+  "log_dir": "runs/var",
+  "log_grad_norm_every": 10,
+  "log_weight_norm_every": 25,
+  "sample_every": 100,
+  "sample_prompt": "A new chapter begins",
+  "sample_max_new_tokens": 96,
+  "wandb_enabled": false,
+  "wandb_project": "text-var"
 }
