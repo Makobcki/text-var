@@ -1,4 +1,5 @@
 import os
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
@@ -40,8 +41,6 @@ def _collate_tokens(batch: list[dict[str, Any]]) -> list[torch.Tensor]:
     ]
 
 
-
-
 def _resolve_amp_dtype(name: str) -> torch.dtype:
     if name == "bf16":
         return torch.bfloat16
@@ -56,6 +55,7 @@ def _is_amp_available(device: torch.device, amp_dtype: torch.dtype) -> bool:
     if amp_dtype is torch.float16:
         return True
     return torch.cuda.is_bf16_supported()
+
 
 def _build_dataset(cfg: TrainConfig):
     if cfg.token_cache_path is not None:
@@ -166,6 +166,8 @@ def run_training(cfg: TrainConfig) -> Path:
         shuffle=not isinstance(dataset, MultiscaleTokenChunkIterableDataset),
         collate_fn=_collate_tokens,
         pin_memory=bool(cfg.pin_memory),
+        num_workers=4,
+        persistent_workers=True,
     )
 
     amp_dtype = _resolve_amp_dtype(cfg.amp_dtype)
@@ -229,14 +231,18 @@ def run_training(cfg: TrainConfig) -> Path:
                 if should_step:
                     if float(cfg.grad_clip_norm) > 0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), float(cfg.grad_clip_norm)
+                        )
                     scaler.step(optimizer)
                     scaler.update()
             else:
                 scaled_loss.backward()
                 if should_step:
                     if float(cfg.grad_clip_norm) > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), float(cfg.grad_clip_norm)
+                        )
                     optimizer.step()
 
             if should_step:
@@ -258,8 +264,6 @@ def run_training(cfg: TrainConfig) -> Path:
                 )
             if step >= int(cfg.max_steps):
                 break
-
-
 
         if not saw_batch:
             raise RuntimeError("VAR training dataloader produced no batches.")
