@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,25 @@ from config import VARConfig
 from model import VARTransformer
 
 
+def _collect_rng_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "torch": torch.random.get_rng_state(),
+        "python": random.getstate(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: dict[str, Any]) -> None:
+    if "torch" in state:
+        torch.random.set_rng_state(state["torch"])
+    if "python" in state:
+        random.setstate(state["python"])
+    if "cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
 def save_checkpoint(
     path: str | Path,
     *,
@@ -16,25 +36,27 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer | None,
     step: int,
     loss: float,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> None:
     ckpt_path = Path(path)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "format": "md-var-checkpoint-v1",
+        "format": "md-var-checkpoint-v2",
         "model_family": "var",
         "model_config": model.cfg.to_dict(),
         "model": model.state_dict(),
         "step": int(step),
         "loss": float(loss),
+        "rng_state": _collect_rng_state(),
     }
     if optimizer is not None:
         payload["optimizer"] = optimizer.state_dict()
+    if scaler is not None:
+        payload["scaler"] = scaler.state_dict()
     torch.save(payload, ckpt_path)
 
 
-def load_checkpoint(
-    path: str | Path, *, device: torch.device
-) -> tuple[VARTransformer, dict[str, Any]]:
+def load_checkpoint(path: str | Path, *, device: torch.device) -> tuple[VARTransformer, dict[str, Any]]:
     payload = torch.load(Path(path), map_location=device)
     if not isinstance(payload, dict):
         raise ValueError("Checkpoint payload must be a dictionary.")
@@ -45,3 +67,15 @@ def load_checkpoint(
     model.load_state_dict(payload["model"])
     model.eval()
     return model, payload
+
+
+def restore_training_state(
+    payload: dict[str, Any], *, optimizer: torch.optim.Optimizer | None = None, scaler: torch.amp.GradScaler | None = None
+) -> None:
+    if optimizer is not None and "optimizer" in payload:
+        optimizer.load_state_dict(payload["optimizer"])
+    if scaler is not None and "scaler" in payload:
+        scaler.load_state_dict(payload["scaler"])
+    rng_state = payload.get("rng_state")
+    if isinstance(rng_state, dict):
+        _restore_rng_state(rng_state)

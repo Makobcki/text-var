@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "text-var"
+version = "0.1.0"
+description = "Experimental multiscale VAR text generation pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "text-var contributors" }]
+dependencies = [
+  "torch>=2.2",
+  "numpy>=1.24",
+  "tqdm>=4.66",
+  "tensorboard>=2.14",
+]
+
+[project.optional-dependencies]
+accelerate = [
+  "bitsandbytes>=0.43; platform_system == 'Linux'",
+  "flash-attn>=2.5; platform_system == 'Linux'",
+]
+
+data = [
+  "datasets>=2.18",
+]
+
+[tool.setuptools]
+py-modules = [
+  "checkpoint",
+  "config",
+  "generator",
+  "loss",
+  "model",
+  "prepare_dataset",
+  "sample",
+  "token_cache",
+  "train",
+  "train_vqvae",
+  "vqvae",
+]

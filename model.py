@@ -204,6 +204,12 @@ class VARTransformer(nn.Module):
 
             x_scale = emb
             use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
+            local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
+            prefix_mask = (
+                self._make_local_bidirectional_mask(l, local_radius, device)
+                if local_radius > 0 and l > 1
+                else None
+            )
             for block in self.blocks:
                 if use_ckpt:
                     x_scale = checkpoint(
@@ -211,11 +217,11 @@ class VARTransformer(nn.Module):
                         use_reentrant=False,
                         tgt=x_scale,
                         memory=current_context,
-                        self_attn_mask=None,
+                        self_attn_mask=prefix_mask,
                         self_is_causal=False,
                     )
                 else:
-                    x_scale = block(tgt=x_scale, memory=current_context, self_attn_mask=None, self_is_causal=False)
+                    x_scale = block(tgt=x_scale, memory=current_context, self_attn_mask=prefix_mask, self_is_causal=False)
 
             encoded = self.norm(x_scale)
             compress_tokens = self.cfg.level_lengths[max(0, s_idx - 1)] if compact_memory_for_final_level else encoded.shape[1]
