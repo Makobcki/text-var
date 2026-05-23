@@ -93,7 +93,8 @@ class SDPADecoderLayer(nn.Module):
         self_attn_mask: torch.Tensor | None = None,
         self_is_causal: bool = False,
         rotary_freqs_tgt: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         x = tgt
 
         x1 = self.norm1(x)
@@ -105,6 +106,11 @@ class SDPADecoderLayer(nn.Module):
         v = v.view(b, l, self.num_heads, self.head_dim)
         if rotary_freqs_tgt is not None:
             q, k = apply_rotary_pos_emb(q, k, rotary_freqs_tgt)
+        if past_key_value is not None:
+            past_k, past_v = past_key_value
+            k = torch.cat([past_k, k], dim=1)
+            v = torch.cat([past_v, v], dim=1)
+        present_key_value = (k, v)
         qh, kh, vh = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         self_attn = F.scaled_dot_product_attention(
             qh,
@@ -133,7 +139,7 @@ class SDPADecoderLayer(nn.Module):
 
         x3 = self.norm3(x)
         x = x + self.dropout(self.ffn(x3))
-        return x
+        return x, present_key_value
 
 
 class VARTransformer(nn.Module):
@@ -224,7 +230,9 @@ class VARTransformer(nn.Module):
         cfg_scale: float = 1.0,
         return_early_outputs: bool = False,
         compact_memory_for_final_level: bool = True,
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        use_cache: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
         if cfg_scale != 1.0 and prefix_inputs:
             out_cond = self.forward(prefix_inputs, target_level=target_level, current_level_input=current_level_input, batch_size=batch_size, cfg_scale=1.0, return_early_outputs=return_early_outputs, compact_memory_for_final_level=compact_memory_for_final_level)
             uncond_prefixes = [torch.zeros_like(p) for p in prefix_inputs]
@@ -266,7 +274,7 @@ class VARTransformer(nn.Module):
             prefix_mask = self._build_prefix_self_attention_mask(l, device)
             for block in self.blocks:
                 if use_ckpt:
-                    x_scale = checkpoint(
+                    x_scale, _ = checkpoint(
                         block,
                         use_reentrant=False,
                         tgt=x_scale,
@@ -274,14 +282,16 @@ class VARTransformer(nn.Module):
                         self_attn_mask=prefix_mask,
                         self_is_causal=False,
                         rotary_freqs_tgt=rotary_freqs_tgt,
+                        past_key_value=None,
                     )
                 else:
-                    x_scale = block(
+                    x_scale, _ = block(
                         tgt=x_scale,
                         memory=current_context,
                         self_attn_mask=prefix_mask,
                         self_is_causal=False,
                         rotary_freqs_tgt=rotary_freqs_tgt,
+                        past_key_value=None,
                     )
 
             encoded = self.norm(x_scale)
@@ -308,10 +318,16 @@ class VARTransformer(nn.Module):
         self_is_causal = True
 
         early_outputs = []
+        present_key_values: list[tuple[torch.Tensor, torch.Tensor]] = []
         use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
+        if use_cache and use_ckpt:
+            raise ValueError("KV-cache is not supported with gradient checkpointing enabled.")
         for layer_idx, block in enumerate(self.blocks):
+            layer_past = None
+            if past_key_values is not None and layer_idx < len(past_key_values):
+                layer_past = past_key_values[layer_idx]
             if use_ckpt:
-                x = checkpoint(
+                x, present = checkpoint(
                     block,
                     use_reentrant=False,
                     tgt=x,
@@ -319,15 +335,19 @@ class VARTransformer(nn.Module):
                     self_attn_mask=self_mask,
                     self_is_causal=self_is_causal,
                     rotary_freqs_tgt=rotary_freqs_tgt,
+                    past_key_value=layer_past,
                 )
             else:
-                x = block(
+                x, present = block(
                     tgt=x,
                     memory=final_memory,
                     self_attn_mask=self_mask,
                     self_is_causal=self_is_causal,
                     rotary_freqs_tgt=rotary_freqs_tgt,
+                    past_key_value=layer_past,
                 )
+            if use_cache:
+                present_key_values.append(present)
             if return_early_outputs and layer_idx in self.cfg.exit_layers:
                 target_features = self.norm(x)
                 head_key = f"layer_{layer_idx}_scale_{target_idx}"
@@ -335,6 +355,8 @@ class VARTransformer(nn.Module):
                 early_outputs.append(logits)
 
         out_features = self.heads[target_idx](self.norm(x))
+        if use_cache:
+            return out_features, present_key_values
         if return_early_outputs:
             return out_features, early_outputs
         return out_features
