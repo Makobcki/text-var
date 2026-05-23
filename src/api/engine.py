@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
 from src.core.pipeline import TextVARPipeline
 
@@ -65,19 +66,31 @@ class TextVAREngine:
         """
         if not params_list:
             raise ValueError("Prompt list cannot be empty.")
-        prompts = [params.prompt for params in params_list]
-        max_tokens = params_list[0].max_tokens
-        if any(params.max_tokens != max_tokens for params in params_list):
-            raise ValueError("All batch items must use the same max_tokens.")
-        temperature = params_list[0].temperature
-        top_p = params_list[0].top_p
-        if any(params.temperature != temperature for params in params_list):
-            raise ValueError("All batch items must use the same temperature.")
-        if any(params.top_p != top_p for params in params_list):
-            raise ValueError("All batch items must use the same top_p.")
-        return self._pipeline.generate_batch(
-            prompts,
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-        )
+        return self._generate_with_grouped_sampling(params_list)
+
+    def _generate_with_grouped_sampling(self, params_list: list[GenerationParams]) -> list[str]:
+        """Generate a mixed-parameter batch by grouping requests.
+
+        Args:
+            params_list: Ordered generation parameters.
+
+        Returns:
+            Generated text preserving the original request ordering.
+        """
+        grouped: Dict[Tuple[int, float, float], List[Tuple[int, GenerationParams]]] = {}
+        for index, params in enumerate(params_list):
+            key = (params.max_tokens, params.temperature, params.top_p)
+            grouped.setdefault(key, []).append((index, params))
+
+        results: list[str] = [""] * len(params_list)
+        for (max_tokens, temperature, top_p), grouped_items in grouped.items():
+            prompts = [item.prompt for _, item in grouped_items]
+            outputs = self._pipeline.generate_batch(
+                prompts,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            for output_idx, (original_idx, _) in enumerate(grouped_items):
+                results[original_idx] = outputs[output_idx]
+        return results
