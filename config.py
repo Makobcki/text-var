@@ -100,6 +100,8 @@ class TrainConfig:
     wandb_project: str = "text-var"
     wandb_run_name: Optional[str] = None
     unconditional_drop_prob: float = 0.1
+    stateful_context_enabled: bool = False
+    stateful_context_max_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,8 @@ def load_train_config(path: Path) -> TrainConfig:
         wandb_project=str(data.get("wandb_project", "text-var")),
         wandb_run_name=str(data["wandb_run_name"]) if data.get("wandb_run_name") else None,
         unconditional_drop_prob=min(1.0, max(0.0, float(data.get("unconditional_drop_prob", 0.1)))),
+        stateful_context_enabled=bool(data.get("stateful_context_enabled", False)),
+        stateful_context_max_tokens=max(0, int(data.get("stateful_context_max_tokens", 0))),
     )
 
 

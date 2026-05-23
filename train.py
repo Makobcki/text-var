@@ -369,6 +369,7 @@ def run_training(cfg: TrainConfig) -> Path:
 
     model.train()
     print(f"[TRAIN] Инициализация пройдена успешно. Старт на {device}.")
+    stateful_level0_context: torch.Tensor | None = None
 
     while step < int(cfg.max_steps):
         saw_batch = False
@@ -406,6 +407,7 @@ def run_training(cfg: TrainConfig) -> Path:
                     corruption_span_max=cfg.corruption_span_max,
                     masked_loss_weight=cfg.masked_loss_weight,
                     use_early_exit_loss=cfg.use_early_exit_loss,
+                    historical_level0_tokens=stateful_level0_context,
                 )
             scaled_loss = loss / grad_accum_steps
 
@@ -499,6 +501,21 @@ def run_training(cfg: TrainConfig) -> Path:
                     scaler=scaler,
                     scheduler=scheduler,
                 )
+            if bool(cfg.stateful_context_enabled):
+                with torch.no_grad():
+                    level0_tokens = moved_tokens[0].detach()
+                    if stateful_level0_context is None:
+                        stateful_level0_context = level0_tokens
+                    else:
+                        stateful_level0_context = torch.cat(
+                            [stateful_level0_context, level0_tokens],
+                            dim=1,
+                        )
+                    if int(cfg.stateful_context_max_tokens) > 0:
+                        stateful_level0_context = stateful_level0_context[
+                            :,
+                            -int(cfg.stateful_context_max_tokens):,
+                        ]
             if step >= int(cfg.max_steps):
                 break
 
