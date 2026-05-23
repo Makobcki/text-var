@@ -36,6 +36,19 @@ def _fit_to_level(token_ids: list[int], *, length: int, vocab_size: int, pad_id:
     return clipped
 
 
+def _append_eos(token_ids: list[int], *, eos_token_id: int) -> list[int]:
+    """Return a copy of token ids with EOS appended.
+
+    Args:
+        token_ids: Source token id sequence.
+        eos_token_id: EOS token id value.
+
+    Returns:
+        New sequence that always ends with EOS.
+    """
+    return [*token_ids, int(eos_token_id)]
+
+
 def _downsample(token_ids: list[int], stride: int) -> list[int]:
     if stride <= 1:
         return token_ids
@@ -43,24 +56,26 @@ def _downsample(token_ids: list[int], stride: int) -> list[int]:
 
 
 def _encode_multiscale(
-    token_ids: list[int], *, level_lengths: tuple[int, ...], level_vocab_sizes: tuple[int, ...]
+    token_ids: list[int], *, level_lengths: tuple[int, ...], level_vocab_sizes: tuple[int, ...], eos_token_id: int
 ) -> list[list[int]]:
     if len(level_lengths) != 3 or len(level_vocab_sizes) != 3:
         raise ValueError("This pipeline expects exactly 3 token levels.")
 
+    token_ids_with_eos = _append_eos(token_ids, eos_token_id=eos_token_id)
+
     # Coarse -> medium -> fine levels from a single BPE/WordPiece stream.
     lvl0 = _fit_to_level(
-        _downsample(token_ids, 4),
+        _downsample(token_ids_with_eos, 4),
         length=level_lengths[0],
         vocab_size=level_vocab_sizes[0],
     )
     lvl1 = _fit_to_level(
-        _downsample(token_ids, 2),
+        _downsample(token_ids_with_eos, 2),
         length=level_lengths[1],
         vocab_size=level_vocab_sizes[1],
     )
     lvl2 = _fit_to_level(
-        token_ids,
+        token_ids_with_eos,
         length=level_lengths[2],
         vocab_size=level_vocab_sizes[2],
     )
@@ -68,9 +83,9 @@ def _encode_multiscale(
 
 
 def process_single_line(
-    args_tuple: tuple[str, int, tuple[int, ...], tuple[int, ...], str, bool],
+    args_tuple: tuple[str, int, tuple[int, ...], tuple[int, ...], str, bool, int],
 ) -> dict[str, object]:
-    line, index, level_lengths, level_vocab_sizes, tokenizer_name, use_fast = args_tuple
+    line, index, level_lengths, level_vocab_sizes, tokenizer_name, use_fast, eos_token_id = args_tuple
 
     payload = json.loads(line)
     text = str(payload.get("content", payload.get("text", ""))).strip()
@@ -93,7 +108,10 @@ def process_single_line(
         }
 
     lvl0, lvl1, lvl2 = _encode_multiscale(
-        token_ids, level_lengths=level_lengths, level_vocab_sizes=level_vocab_sizes
+        token_ids,
+        level_lengths=level_lengths,
+        level_vocab_sizes=level_vocab_sizes,
+        eos_token_id=eos_token_id,
     )
 
     return {
@@ -118,6 +136,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--level-lengths", type=int, nargs=3, default=(32, 128, 1024))
     parser.add_argument("--codebook-dim", type=int, default=256)
     parser.add_argument("--tokenizer-name", type=str, default="bert-base-uncased")
+    parser.add_argument("--eos-token-id", type=int, default=2)
     parser.add_argument("--slow-tokenizer", action="store_true", help="Use python tokenizer instead of fast backend.")
     parser.add_argument(
         "--num-workers",
@@ -169,6 +188,7 @@ def main(argv: list[str] | None = None) -> None:
                         metadata.level_vocab_sizes,
                         args.tokenizer_name,
                         not args.slow_tokenizer,
+                        args.eos_token_id,
                     )
 
             pbar = tqdm(
