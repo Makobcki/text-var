@@ -92,3 +92,40 @@ def test_decoder_layer_returns_concatenated_kv_cache() -> None:
 
     assert tuple(present_k.shape) == (1, 6, 2, 4)
     assert tuple(present_v.shape) == (1, 6, 2, 4)
+
+
+def test_rotary_embedding_uses_cache_position_offset() -> None:
+    cfg = VARConfig(
+        level_vocab_sizes=(32, 64),
+        level_lengths=(4, 4),
+        hidden_size=8,
+        depth=1,
+        num_heads=2,
+        mlp_ratio=1.0,
+        exit_layers=(),
+    )
+    model = VARTransformer(cfg).eval()
+    prefix_tokens = [torch.tensor([[1, 2, 3, 4]], dtype=torch.long)]
+    current_tokens = torch.tensor([[1]], dtype=torch.long)
+
+    past_k = torch.zeros((1, 5, cfg.num_heads, cfg.hidden_size // cfg.num_heads))
+    past_v = torch.zeros((1, 5, cfg.num_heads, cfg.hidden_size // cfg.num_heads))
+    _, cache_with_offset = model(
+        prefix_tokens,
+        target_level=1,
+        current_level_input=current_tokens,
+        use_cache=True,
+        past_key_values=[(past_k, past_v)],
+    )
+
+    _, cache_without_offset = model(
+        prefix_tokens,
+        target_level=1,
+        current_level_input=current_tokens,
+        use_cache=True,
+        past_key_values=None,
+    )
+
+    next_k_with_offset = cache_with_offset[0][0][:, -1]
+    next_k_without_offset = cache_without_offset[0][0][:, -1]
+    assert not torch.allclose(next_k_with_offset, next_k_without_offset)
