@@ -4,14 +4,25 @@ import torch.nn.functional as F
 
 
 class VectorQuantizer(nn.Module):
-    def __init__(self, num_embeddings: int, embedding_dim: int, commitment_cost: float = 0.25):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        commitment_cost: float = 0.25,
+        decay: float = 0.99,
+        epsilon: float = 1e-5,
+    ):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
         self.commitment_cost = commitment_cost
+        self.decay = float(decay)
+        self.epsilon = float(epsilon)
 
         self.codebook = nn.Embedding(self.num_embeddings, self.embedding_dim)
         self.codebook.weight.data.uniform_(-1.0 / self.num_embeddings, 1.0 / self.num_embeddings)
+        self.register_buffer("ema_cluster_size", torch.zeros(self.num_embeddings))
+        self.register_buffer("ema_w", self.codebook.weight.data.clone())
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat_inputs = inputs.view(-1, self.embedding_dim)
@@ -30,9 +41,17 @@ class VectorQuantizer(nn.Module):
 
         quantized = torch.matmul(encodings, self.codebook.weight).view(inputs.shape)
 
+        if self.training:
+            cluster_size = encodings.sum(dim=0)
+            self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1.0 - self.decay)
+            dw = torch.matmul(encodings.t(), flat_inputs)
+            self.ema_w.mul_(self.decay).add_(dw, alpha=1.0 - self.decay)
+            n = self.ema_cluster_size.sum()
+            cluster_size = ((self.ema_cluster_size + self.epsilon) / (n + self.num_embeddings * self.epsilon)) * n
+            self.codebook.weight.data.copy_(self.ema_w / cluster_size.unsqueeze(1))
+
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
-        q_latent_loss = F.mse_loss(quantized, inputs.detach())
-        vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
+        vq_loss = self.commitment_cost * e_latent_loss
 
         quantized = inputs + (quantized - inputs).detach()
         return quantized, vq_loss, encoding_indices.view(inputs.shape[:-1])

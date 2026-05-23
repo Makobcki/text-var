@@ -18,6 +18,8 @@ class KVCacheRingBuffer:
         self._values: list[torch.Tensor] = []
         self._lengths: list[int] = []
         self._write_ptrs: list[int] = []
+        self._materialized_keys: list[torch.Tensor] = []
+        self._materialized_values: list[torch.Tensor] = []
 
     def update(
         self,
@@ -40,8 +42,11 @@ class KVCacheRingBuffer:
                 ordered.append((key_buffer[:, :cur_len], self._values[layer_idx][:, :cur_len]))
                 continue
             ptr = self._write_ptrs[layer_idx]
-            ordered_key = torch.cat([key_buffer[:, ptr:], key_buffer[:, :ptr]], dim=1)
-            ordered_value = torch.cat([self._values[layer_idx][:, ptr:], self._values[layer_idx][:, :ptr]], dim=1)
+            order = (torch.arange(self.max_window, device=key_buffer.device) + ptr) % self.max_window
+            self._materialized_keys[layer_idx].copy_(key_buffer.index_select(1, order))
+            self._materialized_values[layer_idx].copy_(self._values[layer_idx].index_select(1, order))
+            ordered_key = self._materialized_keys[layer_idx]
+            ordered_value = self._materialized_values[layer_idx]
             ordered.append((ordered_key, ordered_value))
         return ordered
 
@@ -52,6 +57,8 @@ class KVCacheRingBuffer:
             self._values.append(torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device))
             self._lengths.append(0)
             self._write_ptrs.append(0)
+            self._materialized_keys.append(torch.empty_like(self._keys[-1]))
+            self._materialized_values.append(torch.empty_like(self._values[-1]))
 
     def _append_layer(self, layer_idx: int, key: torch.Tensor, value: torch.Tensor) -> None:
         step_tokens = key[:, -1:, :, :]

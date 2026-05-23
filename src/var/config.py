@@ -15,6 +15,7 @@ class VARConfig:
     depth: int = 16
     num_heads: int = 16
     mlp_ratio: float = 4.0
+    dropout: float = 0.1
 
     exit_layers: tuple[int, ...] = (4, 8, 12)  # Слои Early Exit
     pad_token_id: int = 0
@@ -34,6 +35,7 @@ class VARConfig:
             depth=int(data.get("depth", 16)),
             num_heads=int(data.get("num_heads", 16)),
             mlp_ratio=float(data.get("mlp_ratio", 4.0)),
+            dropout=float(data.get("dropout", 0.1)),
             exit_layers=tuple(int(v) for v in data.get("exit_layers", (4, 8, 12))),
             pad_token_id=int(data.get("pad_token_id", 0)),
             mask_token_id=int(data.get("mask_token_id", 1)),
