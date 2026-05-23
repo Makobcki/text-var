@@ -78,6 +78,37 @@ def _resolve_amp_dtype(name: str) -> torch.dtype:
     raise ValueError(f"Unsupported AMP dtype: {name}")
 
 
+def _apply_unconditional_prefix_dropout(
+    moved_tokens: list[torch.Tensor],
+    *,
+    drop_prob: float,
+) -> list[torch.Tensor]:
+    """Apply classifier-free guidance unconditional dropout to prefix tokens.
+
+    Args:
+        moved_tokens: Multiscale token tensors with shape ``[batch, seq_len]`` per level.
+        drop_prob: Probability of replacing prefix tokens with zeros for each sample.
+
+    Returns:
+        A token list where prefix levels are zeroed for sampled rows and target levels stay intact.
+    """
+    if not moved_tokens:
+        return moved_tokens
+    if drop_prob <= 0.0:
+        return moved_tokens
+
+    batch_size = moved_tokens[0].size(0)
+    device = moved_tokens[0].device
+    drop_mask = torch.rand(batch_size, device=device) < min(1.0, float(drop_prob))
+    if not bool(drop_mask.any()):
+        return moved_tokens
+
+    dropped_tokens = [level_tokens.clone() for level_tokens in moved_tokens]
+    for level_idx in range(max(0, len(dropped_tokens) - 1)):
+        dropped_tokens[level_idx][drop_mask] = 0
+    return dropped_tokens
+
+
 def _is_amp_available(device: torch.device, amp_dtype: torch.dtype) -> bool:
     if device.type != "cuda":
         return False
@@ -354,6 +385,10 @@ def run_training(cfg: TrainConfig) -> Path:
 
             non_blocking = bool(cfg.pin_memory) and device.type == "cuda"
             moved_tokens = [t.to(device, non_blocking=non_blocking) for t in batch]
+            dropped_tokens = _apply_unconditional_prefix_dropout(
+                moved_tokens,
+                drop_prob=float(cfg.unconditional_drop_prob),
+            )
             micro_step += 1
             should_step = micro_step % grad_accum_steps == 0
 
@@ -363,7 +398,7 @@ def run_training(cfg: TrainConfig) -> Path:
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
                 loss = multiscale_next_scale_cross_entropy(
                     model,
-                    moved_tokens,
+                    dropped_tokens,
                     level_weights=cfg.level_weights,
                     corruption_level_idx=cfg.corruption_level_idx,
                     corruption_prob=cfg.corruption_prob,

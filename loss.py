@@ -16,13 +16,22 @@ def _cross_entropy_per_token(
     target: torch.Tensor,
     *,
     use_flash: bool,
+    ignore_index: int | None = None,
 ) -> torch.Tensor:
     if use_flash and _flash_cross_entropy_loss is not None and logits.is_cuda:
         losses, _ = _flash_cross_entropy_loss(logits, target)
+        if ignore_index is not None:
+            valid_tokens = target != ignore_index
+            losses = losses[valid_tokens]
         return losses
     flat_logits = logits.reshape(-1, logits.size(-1))
     flat_target = target.reshape(-1)
-    return F.cross_entropy(flat_logits, flat_target, reduction="none")
+    ce_ignore_index = ignore_index if ignore_index is not None else -100
+    losses = F.cross_entropy(flat_logits, flat_target, reduction="none", ignore_index=ce_ignore_index)
+    if ignore_index is not None:
+        valid_tokens = flat_target != ignore_index
+        losses = losses[valid_tokens]
+    return losses
 
 
 def multiscale_next_scale_cross_entropy(
@@ -63,6 +72,7 @@ def multiscale_next_scale_cross_entropy(
     scale_losses = []
     batch_size = moved_tokens[0].size(0)
     use_flash = bool(getattr(model.cfg, "flash_cross_entropy", True))
+    ignore_index = getattr(model.cfg, "pad_token_id", None)
 
     for target_idx in range(len(moved_tokens)):
         prefix_inputs = moved_tokens[:target_idx]
@@ -120,7 +130,12 @@ def multiscale_next_scale_cross_entropy(
 
         for i, pred in enumerate(all_predictions):
             is_early = i < (len(all_predictions) - 1)
-            per_token = _cross_entropy_per_token(pred, flat_target, use_flash=use_flash)
+            per_token = _cross_entropy_per_token(
+                pred,
+                flat_target,
+                use_flash=use_flash,
+                ignore_index=ignore_index,
+            )
 
             if flat_mask is not None and flat_mask.any():
                 masked_part = per_token[flat_mask]
