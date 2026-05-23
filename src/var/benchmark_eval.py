@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import logging
 import math
@@ -13,6 +14,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
+import urllib.request
 
 LOGGER = logging.getLogger(__name__)
 
@@ -104,7 +106,10 @@ def estimate_pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
 
 
 def run_candidate_in_sandbox(
-    candidate_code: str, test_code: str, timeout_seconds: float = 3.0
+    candidate_code: str,
+    test_code: str,
+    timeout_seconds: float = 3.0,
+    sandbox_backend: str = "docker",
 ) -> bool:
     """Validate a candidate in a subprocess sandbox.
 
@@ -112,6 +117,7 @@ def run_candidate_in_sandbox(
         candidate_code: Generated source code.
         test_code: Unit tests for the task.
         timeout_seconds: Maximum execution time.
+        sandbox_backend: Execution backend ("docker" or "host").
 
     Returns:
         True if execution succeeded with code 0, False otherwise.
@@ -120,14 +126,48 @@ def run_candidate_in_sandbox(
     with tempfile.TemporaryDirectory(prefix="eval_sandbox_") as tmp_dir:
         path = Path(tmp_dir) / "runner.py"
         path.write_text(script, encoding="utf-8")
-        run = subprocess.run(
-            [os.sys.executable, "-I", str(path)],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            cwd=tmp_dir,
-            check=False,
-        )
+        if sandbox_backend == "docker":
+            run = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--cpus",
+                    "1",
+                    "--memory",
+                    "256m",
+                    "--pids-limit",
+                    "64",
+                    "--read-only",
+                    "--tmpfs",
+                    "/tmp:rw,noexec,nosuid,size=64m",
+                    "-v",
+                    f"{tmp_dir}:/work:ro",
+                    "-w",
+                    "/work",
+                    "python:3.12-alpine",
+                    "python",
+                    "-I",
+                    "runner.py",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        elif sandbox_backend == "host":
+            run = subprocess.run(
+                [os.sys.executable, "-I", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=tmp_dir,
+                check=False,
+            )
+        else:
+            raise ValueError(f"Unsupported sandbox backend: {sandbox_backend}")
         return run.returncode == 0
 
 
@@ -177,6 +217,12 @@ def _jsonl_persistent_sampler(command: str) -> Callable[[BenchmarkProblem, int],
         text=True,
     )
 
+    def _cleanup_proc() -> None:
+        if proc.poll() is None:
+            proc.terminate()
+
+    atexit.register(_cleanup_proc)
+
     def sampler(problem: BenchmarkProblem, n_samples: int) -> Iterable[str]:
         assert proc.stdin and proc.stdout
         for _ in range(n_samples):
@@ -188,6 +234,13 @@ def _jsonl_persistent_sampler(command: str) -> Callable[[BenchmarkProblem, int],
             payload = json.loads(line)
             yield extract_code_from_text(str(payload.get("code", "")))
 
+
+    def close() -> None:
+        """Stop the persistent model process."""
+        if proc.poll() is None:
+            proc.terminate()
+
+    setattr(sampler, "close", close)
     return sampler
 
 
@@ -240,6 +293,7 @@ def evaluate_pass_at_k(
     n_samples: int,
     k_values: Sequence[int],
     timeout_seconds: float = 3.0,
+    sandbox_backend: str = "docker",
 ) -> dict[int, float]:
     """Evaluate benchmark and aggregate pass@k metrics.
 
@@ -249,6 +303,7 @@ def evaluate_pass_at_k(
         n_samples: Number of candidates per task.
         k_values: Sequence of k values for pass@k.
         timeout_seconds: Sandbox timeout per candidate.
+        sandbox_backend: Execution backend ("docker" or "host").
 
     Returns:
         Dictionary of k -> mean pass@k across tasks.
@@ -258,7 +313,12 @@ def evaluate_pass_at_k(
         correct = 0
         for code in sampler(problem, n_samples):
             correct += int(
-                run_candidate_in_sandbox(code, problem.test_code, timeout_seconds=timeout_seconds)
+                run_candidate_in_sandbox(
+                    code,
+                    problem.test_code,
+                    timeout_seconds=timeout_seconds,
+                    sandbox_backend=sandbox_backend,
+                )
             )
         for k in k_values:
             totals[k] += estimate_pass_at_k(n_samples, correct, k)
@@ -280,6 +340,7 @@ def main() -> None:
     parser.add_argument("--n-samples", type=int, default=20)
     parser.add_argument("--k", type=int, nargs="+", default=[1, 10])
     parser.add_argument("--timeout", type=float, default=3.0)
+    parser.add_argument("--sandbox-backend", choices=["docker", "host"], default="docker")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -295,7 +356,14 @@ def main() -> None:
 
     print(
         json.dumps(
-            evaluate_pass_at_k(problems, sampler, args.n_samples, args.k, args.timeout),
+            evaluate_pass_at_k(
+                problems,
+                sampler,
+                args.n_samples,
+                args.k,
+                args.timeout,
+                sandbox_backend=args.sandbox_backend,
+            ),
             indent=2,
             sort_keys=True,
         )

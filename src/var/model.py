@@ -188,37 +188,43 @@ class VARTransformer(nn.Module):
             return x
         return F.adaptive_avg_pool1d(x.transpose(1, 2), keep).transpose(1, 2)
 
-    def _make_local_bidirectional_mask(self, seq_len: int, radius: int, device: torch.device) -> torch.Tensor:
-        """Return a local bidirectional attention mask for SDPA.
-
-        Tokens can attend to neighbors on both sides inside ``radius`` positions.
-        Anything outside the local window is masked out.
-        """
-        idx = torch.arange(seq_len, device=device)
-        row = idx.unsqueeze(1)
-        col = idx.unsqueeze(0)
-        invalid = (col - row).abs() > radius
-        return invalid.view(1, 1, seq_len, seq_len)
-
-    def _build_prefix_self_attention_mask(
+    def _run_prefix_block_with_sliding_window(
         self,
-        seq_len: int,
-        device: torch.device,
-    ) -> torch.Tensor | None:
-        """Build a local self-attention mask for prefix encoding.
+        block: SDPADecoderLayer,
+        x_scale: torch.Tensor,
+        current_context: torch.Tensor,
+        rotary_freqs_tgt: torch.Tensor,
+        radius: int,
+    ) -> torch.Tensor:
+        """Run one prefix block with causal sliding-window attention.
 
         Args:
-            seq_len: Prefix token sequence length.
-            device: Device where the mask should be allocated.
+            block: Decoder block to execute.
+            x_scale: Prefix embeddings for one scale.
+            current_context: Cross-attention memory.
+            rotary_freqs_tgt: Rotary frequencies for prefix sequence.
+            radius: Sliding-window radius in tokens.
 
         Returns:
-            Local bidirectional mask for SDPA when configured and meaningful,
-            otherwise ``None`` to allow dense attention kernels.
+            Updated prefix features.
         """
-        local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
-        if local_radius <= 0 or seq_len <= 1:
-            return None
-        return self._make_local_bidirectional_mask(seq_len, local_radius, device)
+        states: list[torch.Tensor] = []
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None
+        for idx in range(x_scale.shape[1]):
+            token = x_scale[:, idx : idx + 1, :]
+            token_freqs = rotary_freqs_tgt[idx : idx + 1]
+            out_token, present = block(
+                tgt=token,
+                memory=current_context,
+                self_attn_mask=None,
+                self_is_causal=True,
+                rotary_freqs_tgt=token_freqs,
+                past_key_value=past_key_value,
+            )
+            states.append(out_token)
+            keep = max(1, radius)
+            past_key_value = (present[0][:, -keep:, :, :], present[1][:, -keep:, :, :])
+        return torch.cat(states, dim=1)
 
     def forward(
         self,
@@ -271,15 +277,23 @@ class VARTransformer(nn.Module):
 
             x_scale = emb
             use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
-            prefix_mask = self._build_prefix_self_attention_mask(l, device)
+            local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
             for block in self.blocks:
-                if use_ckpt:
+                if local_radius > 0 and l > 1:
+                    x_scale = self._run_prefix_block_with_sliding_window(
+                        block=block,
+                        x_scale=x_scale,
+                        current_context=current_context,
+                        rotary_freqs_tgt=rotary_freqs_tgt,
+                        radius=local_radius,
+                    )
+                elif use_ckpt:
                     x_scale, _ = checkpoint(
                         block,
                         use_reentrant=False,
                         tgt=x_scale,
                         memory=current_context,
-                        self_attn_mask=prefix_mask,
+                        self_attn_mask=None,
                         self_is_causal=False,
                         rotary_freqs_tgt=rotary_freqs_tgt,
                         past_key_value=None,
@@ -288,7 +302,7 @@ class VARTransformer(nn.Module):
                     x_scale, _ = block(
                         tgt=x_scale,
                         memory=current_context,
-                        self_attn_mask=prefix_mask,
+                        self_attn_mask=None,
                         self_is_causal=False,
                         rotary_freqs_tgt=rotary_freqs_tgt,
                         past_key_value=None,
