@@ -186,10 +186,11 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
 
     try:
         prompts = _normalize_prompts(request.prompt)
-        generated_texts = [
-            _engine.generate(GenerationParams(prompt=prompt, max_tokens=request.max_tokens))
+        params_batch = [
+            GenerationParams(prompt=prompt, max_tokens=request.max_tokens)
             for prompt in prompts
         ]
+        generated_texts = _engine.generate_batch(params_batch)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
