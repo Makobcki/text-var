@@ -40,11 +40,16 @@ class VectorQuantizer(nn.Module):
 
 class SemanticTextVQVAE(nn.Module):
     def __init__(
-        self, vocab_size: int = 32000, hidden_size: int = 1024, num_semantic_tokens: int = 4096
+        self,
+        vocab_size: int = 32000,
+        hidden_size: int = 1024,
+        num_semantic_tokens: int = 4096,
+        pad_token_id: int = 0,
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
+        self.pad_token_id = int(pad_token_id)
 
         self.embedding = nn.Embedding(vocab_size, hidden_size)
 
@@ -66,19 +71,27 @@ class SemanticTextVQVAE(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
 
+    def _resolve_padding_mask(
+        self,
+        bpe_tokens: torch.Tensor,
+        padding_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        inferred_padding_mask = bpe_tokens.eq(int(self.pad_token_id))
+        if padding_mask is None:
+            return inferred_padding_mask
+        return padding_mask.bool() | inferred_padding_mask
+
     def encode_sentence(
         self, bpe_tokens: torch.Tensor, padding_mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        padding_mask = self._resolve_padding_mask(bpe_tokens, padding_mask)
         x = self.embedding(bpe_tokens)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        if padding_mask is not None:
-            mask_expanded = (~padding_mask).unsqueeze(-1).float()
-            sentence_vector = (encoded * mask_expanded).sum(dim=1) / (
-                mask_expanded.sum(dim=1) + 1e-9
-            )
-        else:
-            sentence_vector = encoded.mean(dim=1)
+        mask_expanded = (~padding_mask).unsqueeze(-1).float()
+        sentence_vector = (encoded * mask_expanded).sum(dim=1) / (
+            mask_expanded.sum(dim=1) + 1e-9
+        )
 
         _, vq_loss, semantic_idx = self.quantizer(sentence_vector)
         return semantic_idx, vq_loss
@@ -142,17 +155,15 @@ class SemanticTextVQVAE(nn.Module):
     def forward(
         self, bpe_tokens: torch.Tensor, padding_mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        padding_mask = self._resolve_padding_mask(bpe_tokens, padding_mask)
         # --- 1. ЭТАП ЭНКОДИНГА ---
         x = self.embedding(bpe_tokens)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        if padding_mask is not None:
-            mask_expanded = (~padding_mask).unsqueeze(-1).float()
-            sentence_vector = (encoded * mask_expanded).sum(dim=1) / (
-                mask_expanded.sum(dim=1) + 1e-9
-            )
-        else:
-            sentence_vector = encoded.mean(dim=1)
+        mask_expanded = (~padding_mask).unsqueeze(-1).float()
+        sentence_vector = (encoded * mask_expanded).sum(dim=1) / (
+            mask_expanded.sum(dim=1) + 1e-9
+        )
 
         # --- 2. ЭТАП КВАНТОВАНИЯ ---
         quantized, vq_loss, semantic_idx = self.quantizer(sentence_vector)
@@ -178,18 +189,13 @@ class SemanticTextVQVAE(nn.Module):
         # Таргеты сдвинуты на +1 относительно входов декодера
         recon_targets = bpe_tokens[:, 1:]
 
-        if padding_mask is not None:
-            loss_mask = padding_mask[:, 1:]
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)), recon_targets.reshape(-1), reduction="none"
-            )
-            loss = loss.view(recon_targets.shape)
-            loss = loss.masked_fill(loss_mask, 0.0)
-            recon_loss = loss.sum() / (~loss_mask).sum().clamp(min=1)
-        else:
-            recon_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)), recon_targets.reshape(-1)
-            )
+        loss_mask = padding_mask[:, 1:]
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)), recon_targets.reshape(-1), reduction="none"
+        )
+        loss = loss.view(recon_targets.shape)
+        loss = loss.masked_fill(loss_mask, 0.0)
+        recon_loss = loss.sum() / (~loss_mask).sum().clamp(min=1)
 
         # Итоговый лосс для pre-train этапа
         total_loss = recon_loss + vq_loss

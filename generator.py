@@ -11,6 +11,58 @@ class RollbackEvent(RuntimeError):
         self.block_end = block_end
 
 
+class KVCacheRingBuffer:
+    def __init__(self, max_window: int) -> None:
+        self.max_window = max(1, int(max_window))
+        self._keys: list[torch.Tensor] = []
+        self._values: list[torch.Tensor] = []
+        self._lengths: list[int] = []
+        self._write_ptrs: list[int] = []
+
+    def update(
+        self,
+        present_key_values: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        if not self._keys:
+            self._allocate(present_key_values)
+        for layer_idx, (key, value) in enumerate(present_key_values):
+            self._append_layer(layer_idx, key, value)
+        return self.materialize()
+
+    def materialize(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        ordered: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer_idx, key_buffer in enumerate(self._keys):
+            cur_len = self._lengths[layer_idx]
+            if cur_len == 0:
+                ordered.append((key_buffer[:, :0], self._values[layer_idx][:, :0]))
+                continue
+            if cur_len < self.max_window:
+                ordered.append((key_buffer[:, :cur_len], self._values[layer_idx][:, :cur_len]))
+                continue
+            ptr = self._write_ptrs[layer_idx]
+            ordered_key = torch.cat([key_buffer[:, ptr:], key_buffer[:, :ptr]], dim=1)
+            ordered_value = torch.cat([self._values[layer_idx][:, ptr:], self._values[layer_idx][:, :ptr]], dim=1)
+            ordered.append((ordered_key, ordered_value))
+        return ordered
+
+    def _allocate(self, present_key_values: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+        for key, value in present_key_values:
+            b, _, h, d = key.shape
+            self._keys.append(torch.empty((b, self.max_window, h, d), dtype=key.dtype, device=key.device))
+            self._values.append(torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device))
+            self._lengths.append(0)
+            self._write_ptrs.append(0)
+
+    def _append_layer(self, layer_idx: int, key: torch.Tensor, value: torch.Tensor) -> None:
+        step_tokens = key[:, -1:, :, :]
+        step_values = value[:, -1:, :, :]
+        write_ptr = self._write_ptrs[layer_idx]
+        self._keys[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_tokens
+        self._values[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_values
+        self._write_ptrs[layer_idx] = (write_ptr + 1) % self.max_window
+        self._lengths[layer_idx] = min(self.max_window, self._lengths[layer_idx] + 1)
+
+
 def thermodynamic_sampling_with_stats(
     logits: torch.Tensor,
     alpha: float = 1.0,
@@ -61,6 +113,37 @@ def _decode_next_ar_token(
     pos = sequence.shape[1]
     return thermodynamic_sampling_with_stats(
         logits[:, pos, :], alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+    )
+
+
+def _decode_next_ar_token_with_cache(
+    model: VARTransformer,
+    *,
+    prefix_inputs: list[torch.Tensor],
+    target_level: int,
+    token_input: torch.Tensor,
+    cfg_scale: float,
+    alpha: float,
+    healthy_entropy_limit: float,
+    past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None,
+    cache_ring_buffer: KVCacheRingBuffer,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+    logits, present_key_values = model(
+        prefix_inputs=prefix_inputs,
+        target_level=target_level,
+        current_level_input=token_input,
+        cfg_scale=cfg_scale,
+        past_key_values=past_key_values,
+        use_cache=True,
+    )
+    next_token, entropy, chaos = thermodynamic_sampling_with_stats(
+        logits[:, -1, :], alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+    )
+    return (
+        next_token,
+        entropy,
+        chaos,
+        cache_ring_buffer.update(present_key_values),
     )
 
 
@@ -191,8 +274,9 @@ def hybrid_cascade_decode(
     healthy_entropy_limit: float = 1.5,
     min_block_size_lvl2: int = 16,
     max_seams_per_inpaint_pass: int = 10,
+    bpe_chunk_length: int = 128,
 ) -> list[torch.Tensor]:
-
+    max_local_window = 1024
     batch = int(batch_size)
     out: list[torch.Tensor] = []
     conditioned_prefixes = prefix_inputs or []
@@ -250,25 +334,52 @@ def hybrid_cascade_decode(
             "[HYBRID] Фаза 2: AR продолжение структурного каркаса "
             f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
         )
-    for _ in range(lvl_1_sequence.shape[1], len_lvl_1):
-        next_token, _, _ = _decode_next_ar_token(
-            model,
-            prefix_inputs=[out[0]],
-            target_level=1,
-            sequence=lvl_1_sequence,
-            cfg_scale=cfg_scale,
-            alpha=alpha,
-            healthy_entropy_limit=healthy_entropy_limit,
-        )
-        lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)
+    past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+    cache_ring_buffer = KVCacheRingBuffer(max_window=max_local_window)
+    finished = torch.zeros(batch, dtype=torch.bool, device=device)
+    actual_lvl_1_len = len_lvl_1
+    chunk_size = max(1, int(bpe_chunk_length))
+    tokens_remaining = max(0, len_lvl_1 - lvl_1_sequence.shape[1])
+    num_chunks = (tokens_remaining + chunk_size - 1) // chunk_size
+    global_level_0_memory = out[0]
+    for chunk_idx in range(num_chunks):
+        chunk_start = lvl_1_sequence.shape[1]
+        chunk_end = min(len_lvl_1, chunk_start + chunk_size)
+        for _ in range(chunk_start, chunk_end):
+            token_input = (
+                torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=device)
+                if lvl_1_sequence.shape[1] == 0
+                else lvl_1_sequence[:, -1:].contiguous()
+            )
+            next_token, _, _, past_key_values = _decode_next_ar_token_with_cache(
+                model,
+                prefix_inputs=[global_level_0_memory],
+                target_level=1,
+                token_input=token_input,
+                cfg_scale=cfg_scale,
+                alpha=alpha,
+                healthy_entropy_limit=healthy_entropy_limit,
+                past_key_values=past_key_values,
+                cache_ring_buffer=cache_ring_buffer,
+            )
+            is_eos = next_token == int(model.cfg.eos_token_id)
+            finished |= is_eos
+            lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)
+            if finished.all():
+                actual_lvl_1_len = lvl_1_sequence.shape[1]
+                break
+        if finished.all():
+            break
     if len(out) < 2:
         out.append(lvl_1_sequence)
     else:
         out[1] = lvl_1_sequence
 
-    len_lvl_2 = model.cfg.level_lengths[2]
+    full_lvl_2_len = model.cfg.level_lengths[2]
+    scale_factor = max(1, full_lvl_2_len // len_lvl_1)
+    len_lvl_2 = min(full_lvl_2_len, actual_lvl_1_len * scale_factor)
     min_block = max(1, int(min_block_size_lvl2))
-    block_count = max(1, min(len_lvl_1, len_lvl_2 // min_block))
+    block_count = max(1, min(actual_lvl_1_len, len_lvl_2 // min_block))
     block_size = max(min_block, len_lvl_2 // block_count)
 
     print(f"[HYBRID] Фаза 3.1: Параллельный драфт ({block_count} блоков, block_size={block_size})...")

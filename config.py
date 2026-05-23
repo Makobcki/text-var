@@ -21,6 +21,7 @@ class VARConfig:
     exit_layers: tuple[int, ...] = (4, 8, 12)  # Слои Early Exit
     pad_token_id: int = 0
     mask_token_id: int = 1  # Используется для NAR генерации
+    eos_token_id: int = 2
     gradient_checkpointing: bool = False
     local_attention_radius: int = 0
 
@@ -36,6 +37,7 @@ class VARConfig:
             exit_layers=tuple(int(v) for v in data.get("exit_layers", (4, 8, 12))),
             pad_token_id=int(data.get("pad_token_id", 0)),
             mask_token_id=int(data.get("mask_token_id", 1)),
+            eos_token_id=int(data.get("eos_token_id", 2)),
             gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
             local_attention_radius=int(data.get("local_attention_radius", 0)),
         )
@@ -97,6 +99,9 @@ class TrainConfig:
     wandb_enabled: bool = False
     wandb_project: str = "text-var"
     wandb_run_name: Optional[str] = None
+    unconditional_drop_prob: float = 0.1
+    stateful_context_enabled: bool = False
+    stateful_context_max_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -178,6 +183,9 @@ def load_train_config(path: Path) -> TrainConfig:
         wandb_enabled=bool(data.get("wandb_enabled", False)),
         wandb_project=str(data.get("wandb_project", "text-var")),
         wandb_run_name=str(data["wandb_run_name"]) if data.get("wandb_run_name") else None,
+        unconditional_drop_prob=min(1.0, max(0.0, float(data.get("unconditional_drop_prob", 0.1)))),
+        stateful_context_enabled=bool(data.get("stateful_context_enabled", False)),
+        stateful_context_max_tokens=max(0, int(data.get("stateful_context_max_tokens", 0))),
     )
 
 
