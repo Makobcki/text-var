@@ -1,0 +1,1 @@
+"""Text-VAR source package."""
