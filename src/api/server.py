@@ -2,6 +2,7 @@
 #!/usr/bin/env python
 
 import argparse
+import asyncio
 import json
 import logging
 import time
@@ -25,6 +26,84 @@ LOGGER = logging.getLogger(__name__)
 # Глобальный инстанс модели (чтобы загружать веса 1 раз)
 _pipeline: TextVARPipeline | None = None
 _engine: TextVAREngine | None = None
+
+
+class _BatchTask:
+    """Internal asynchronous completion task for continuous batching."""
+
+    def __init__(self, params: GenerationParams) -> None:
+        self.params = params
+        self.future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+
+class ContinuousBatchingProcessor:
+    """Continuously merges pending generation tasks into dynamic batches."""
+
+    def __init__(self, max_batch_size: int = 16, collect_window_ms: int = 8) -> None:
+        self._max_batch_size = max_batch_size
+        self._collect_window_seconds = collect_window_ms / 1000
+        self._queue: asyncio.Queue[_BatchTask] = asyncio.Queue()
+        self._worker_task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        """Start the background batch worker."""
+        if self._worker_task is None:
+            self._worker_task = asyncio.create_task(self._run_worker())
+
+    async def stop(self) -> None:
+        """Stop the background batch worker."""
+        if self._worker_task is None:
+            return
+        self._worker_task.cancel()
+        try:
+            await self._worker_task
+        except asyncio.CancelledError:
+            LOGGER.debug("Continuous batching worker cancelled.")
+        self._worker_task = None
+
+    async def generate(self, params: GenerationParams) -> str:
+        """Queue generation request and wait for result."""
+        task = _BatchTask(params)
+        await self._queue.put(task)
+        return await task.future
+
+    async def _run_worker(self) -> None:
+        """Process queued requests with dynamic batch formation."""
+        while True:
+            first_task = await self._queue.get()
+            pending: list[_BatchTask] = [first_task]
+
+            deadline = asyncio.get_running_loop().time() + self._collect_window_seconds
+            while len(pending) < self._max_batch_size:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    pending.append(await asyncio.wait_for(self._queue.get(), timeout=remaining))
+                except asyncio.TimeoutError:
+                    break
+
+            if _engine is None:
+                for task in pending:
+                    if not task.future.done():
+                        task.future.set_exception(RuntimeError("Model is not loaded."))
+                continue
+
+            params_batch = [task.params for task in pending]
+            try:
+                outputs = await run_in_threadpool(_engine.generate_batch, params_batch)
+            except Exception as exc:
+                for task in pending:
+                    if not task.future.done():
+                        task.future.set_exception(exc)
+                continue
+
+            for output, task in zip(outputs, pending):
+                if not task.future.done():
+                    task.future.set_result(output)
+
+
+_batch_processor = ContinuousBatchingProcessor()
 
 
 # --- Pydantic Models for OpenAI API Contract ---
@@ -138,7 +217,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         LOGGER.warning("Pipeline is not initialized! Requests will fail.")
     else:
         LOGGER.info("API is ready to serve requests.")
+    await _batch_processor.start()
     yield
+    await _batch_processor.stop()
 
 
 app = FastAPI(title="TextVAR OpenAI API", version="1.0.0", lifespan=lifespan)
@@ -208,7 +289,9 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
             )
             for prompt in prompts
         ]
-        generated_texts = await run_in_threadpool(_engine.generate_batch, params_batch)
+        generated_texts = await asyncio.gather(
+            *[_batch_processor.generate(params) for params in params_batch]
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
