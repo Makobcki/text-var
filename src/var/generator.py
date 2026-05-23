@@ -3,7 +3,7 @@ from typing import Union
 import torch
 import torch.nn.functional as F
 
-from src.var.model import VARTransformer
+from src.var.model import RingKVCacheView, VARTransformer
 
 
 class RollbackEvent(RuntimeError):
@@ -14,55 +14,71 @@ class RollbackEvent(RuntimeError):
 
 
 class KVCacheRingBuffer:
+    """Ring buffer for per-layer KV tensors used during autoregressive decoding."""
+
     def __init__(self, max_window: int) -> None:
+        """Initialize the ring buffer.
+
+        Args:
+            max_window: Maximum number of KV tokens to keep.
+        """
         self.max_window = max(1, int(max_window))
         self._keys: list[torch.Tensor] = []
         self._values: list[torch.Tensor] = []
         self._lengths: list[int] = []
         self._write_ptrs: list[int] = []
-        self._materialized_keys: list[torch.Tensor] = []
-        self._materialized_values: list[torch.Tensor] = []
 
     def update(
         self,
         present_key_values: list[tuple[torch.Tensor, torch.Tensor]],
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    ) -> list[RingKVCacheView]:
+        """Append a single decoding step and expose ordered cache tensors.
+
+        Args:
+            present_key_values: Per-layer present KV tensors from the model.
+
+        Returns:
+            Ordered per-layer KV tensors for the next decoding step.
+        """
         if not self._keys:
             self._allocate(present_key_values)
         for layer_idx, (key, value) in enumerate(present_key_values):
             self._append_layer(layer_idx, key, value)
         return self.materialize()
 
-    def materialize(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        ordered: list[tuple[torch.Tensor, torch.Tensor]] = []
+    def materialize(self) -> list[RingKVCacheView]:
+        """Return static ring buffers and logical token positions.
+
+        Returns:
+            A per-layer immutable view for downstream attention.
+        """
+        ordered: list[RingKVCacheView] = []
         for layer_idx, key_buffer in enumerate(self._keys):
             cur_len = self._lengths[layer_idx]
             if cur_len == 0:
-                ordered.append((key_buffer[:, :0], self._values[layer_idx][:, :0]))
+                positions = torch.empty((0,), dtype=torch.long, device=key_buffer.device)
+                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions))
                 continue
             if cur_len < self.max_window:
-                ordered.append((key_buffer[:, :cur_len], self._values[layer_idx][:, :cur_len]))
+                positions = torch.arange(cur_len, device=key_buffer.device, dtype=torch.long)
+                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions))
                 continue
             ptr = self._write_ptrs[layer_idx]
-            order = (torch.arange(self.max_window, device=key_buffer.device) + ptr) % self.max_window
-            self._materialized_keys[layer_idx].copy_(key_buffer.index_select(1, order))
-            self._materialized_values[layer_idx].copy_(self._values[layer_idx].index_select(1, order))
-            ordered_key = self._materialized_keys[layer_idx]
-            ordered_value = self._materialized_values[layer_idx]
-            ordered.append((ordered_key, ordered_value))
+            positions = (torch.arange(self.max_window, device=key_buffer.device, dtype=torch.long) + ptr) % self.max_window
+            ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions))
         return ordered
 
     def _allocate(self, present_key_values: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+        """Allocate fixed-size KV storage for each layer."""
         for key, value in present_key_values:
             b, _, h, d = key.shape
             self._keys.append(torch.empty((b, self.max_window, h, d), dtype=key.dtype, device=key.device))
             self._values.append(torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device))
             self._lengths.append(0)
             self._write_ptrs.append(0)
-            self._materialized_keys.append(torch.empty_like(self._keys[-1]))
-            self._materialized_values.append(torch.empty_like(self._values[-1]))
 
     def _append_layer(self, layer_idx: int, key: torch.Tensor, value: torch.Tensor) -> None:
+        """Write the newest token KV for a layer into the ring."""
         step_tokens = key[:, -1:, :, :]
         step_values = value[:, -1:, :, :]
         write_ptr = self._write_ptrs[layer_idx]
@@ -181,9 +197,9 @@ def _decode_next_ar_token_with_cache(
     healthy_entropy_limit: float,
     temperature: Union[float, torch.Tensor],
     top_p: Union[float, torch.Tensor],
-    past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None,
+    past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None,
     cache_ring_buffer: KVCacheRingBuffer,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[RingKVCacheView]]:
     logits, present_key_values = model(
         prefix_inputs=prefix_inputs,
         target_level=target_level,
@@ -406,7 +422,7 @@ def hybrid_cascade_decode(
             "[HYBRID] Фаза 2: AR продолжение структурного каркаса "
             f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
         )
-    past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+    past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None = None
     cache_ring_buffer = KVCacheRingBuffer(max_window=max_local_window)
     finished = torch.zeros(batch, dtype=torch.bool, device=device)
     actual_lvl_1_len = len_lvl_1
