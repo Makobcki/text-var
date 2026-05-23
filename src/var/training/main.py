@@ -394,7 +394,7 @@ def run_training(cfg: TrainConfig) -> Path:
             micro_step += 1
             should_step = micro_step % grad_accum_steps == 0
 
-            if micro_step % grad_accum_steps == 1:
+            if (micro_step - 1) % grad_accum_steps == 0:
                 optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
