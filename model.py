@@ -6,6 +6,41 @@ from torch.utils.checkpoint import checkpoint
 from config import VARConfig
 
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, max_position_embeddings: int = 32768, base: float = 10000.0) -> None:
+        super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
+        t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        return torch.cat((freqs, freqs), dim=-1)
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    freqs: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    freqs = freqs.unsqueeze(0).unsqueeze(2)
+    cos = freqs.cos()
+    sin = freqs.sin()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
 class SDPADecoderLayer(nn.Module):
     def __init__(self, hidden: int, num_heads: int, mlp_ratio: float, dropout: float = 0.1) -> None:
         super().__init__()
@@ -57,13 +92,20 @@ class SDPADecoderLayer(nn.Module):
         memory: torch.Tensor,
         self_attn_mask: torch.Tensor | None = None,
         self_is_causal: bool = False,
+        rotary_freqs_tgt: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = tgt
 
         x1 = self.norm1(x)
         qkv = self.self_qkv(x1)
         q, k, v = qkv.chunk(3, dim=-1)
-        qh, kh, vh = self._shape_heads(q), self._shape_heads(k), self._shape_heads(v)
+        b, l, _ = x.shape
+        q = q.view(b, l, self.num_heads, self.head_dim)
+        k = k.view(b, l, self.num_heads, self.head_dim)
+        v = v.view(b, l, self.num_heads, self.head_dim)
+        if rotary_freqs_tgt is not None:
+            q, k = apply_rotary_pos_emb(q, k, rotary_freqs_tgt)
+        qh, kh, vh = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         self_attn = F.scaled_dot_product_attention(
             qh,
             kh,
@@ -104,9 +146,7 @@ class VARTransformer(nn.Module):
             [nn.Embedding(vocab_size, hidden) for vocab_size in cfg.level_vocab_sizes]
         )
         self.scale_embedding = nn.Embedding(len(cfg.level_vocab_sizes), hidden)
-
-        max_local_len = max(cfg.level_lengths)
-        self.local_position_embedding = nn.Embedding(max_local_len, hidden)
+        self.rotary_emb = RotaryEmbedding(dim=hidden // int(cfg.num_heads))
 
         self.target_token = nn.Parameter(torch.randn(1, 1, cfg.hidden_size))
 
@@ -219,8 +259,7 @@ class VARTransformer(nn.Module):
             emb = self.token_embeddings[s_idx](scale_input)
             emb = emb + self.scale_embedding.weight[s_idx].view(1, 1, -1)
             l = scale_input.shape[1]
-            local_ids = torch.arange(l, device=device)
-            emb = emb + self.local_position_embedding(local_ids).view(1, l, -1)
+            rotary_freqs_tgt = self.rotary_emb(emb, l)
 
             x_scale = emb
             use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
@@ -234,9 +273,16 @@ class VARTransformer(nn.Module):
                         memory=current_context,
                         self_attn_mask=prefix_mask,
                         self_is_causal=False,
+                        rotary_freqs_tgt=rotary_freqs_tgt,
                     )
                 else:
-                    x_scale = block(tgt=x_scale, memory=current_context, self_attn_mask=prefix_mask, self_is_causal=False)
+                    x_scale = block(
+                        tgt=x_scale,
+                        memory=current_context,
+                        self_attn_mask=prefix_mask,
+                        self_is_causal=False,
+                        rotary_freqs_tgt=rotary_freqs_tgt,
+                    )
 
             encoded = self.norm(x_scale)
             compress_tokens = self.cfg.level_lengths[max(0, s_idx - 1)] if compact_memory_for_final_level else encoded.shape[1]
@@ -254,8 +300,7 @@ class VARTransformer(nn.Module):
             x = self.target_token.expand(b, target_len, -1)
 
         x = x + self.scale_embedding.weight[target_idx].view(1, 1, -1)
-        local_ids = torch.arange(target_len, device=device)
-        x = x + self.local_position_embedding(local_ids).view(1, target_len, -1)
+        rotary_freqs_tgt = self.rotary_emb(x, target_len)
 
         # Keep attn_mask=None so SDPA can stay on Flash Attention kernels.
         # Dense custom masks often force fallback to math backend with O(N^2) memory.
@@ -273,9 +318,16 @@ class VARTransformer(nn.Module):
                     memory=final_memory,
                     self_attn_mask=self_mask,
                     self_is_causal=self_is_causal,
+                    rotary_freqs_tgt=rotary_freqs_tgt,
                 )
             else:
-                x = block(tgt=x, memory=final_memory, self_attn_mask=self_mask, self_is_causal=self_is_causal)
+                x = block(
+                    tgt=x,
+                    memory=final_memory,
+                    self_attn_mask=self_mask,
+                    self_is_causal=self_is_causal,
+                    rotary_freqs_tgt=rotary_freqs_tgt,
+                )
             if return_early_outputs and layer_idx in self.cfg.exit_layers:
                 target_features = self.norm(x)
                 head_key = f"layer_{layer_idx}_scale_{target_idx}"

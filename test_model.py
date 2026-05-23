@@ -16,8 +16,9 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         memory: torch.Tensor,
         self_attn_mask: torch.Tensor | None = None,
         self_is_causal: bool = False,
+        rotary_freqs_tgt: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del memory, self_is_causal
+        del memory, self_is_causal, rotary_freqs_tgt
         self.masks.append(self_attn_mask)
         return tgt
 
