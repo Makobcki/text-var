@@ -1,9 +1,26 @@
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from src.var.training.config import VARConfig
+
+
+@dataclass(frozen=True)
+class RingKVCacheView:
+    """Read-only view of static KV ring buffers for one decoder layer.
+
+    Attributes:
+        keys: Preallocated ring buffer for keys with shape [B, W, H, D].
+        values: Preallocated ring buffer for values with shape [B, W, H, D].
+        positions: Logical order of valid KV entries in `keys/values`.
+    """
+
+    keys: torch.Tensor
+    values: torch.Tensor
+    positions: torch.Tensor
 
 
 class RotaryEmbedding(nn.Module):
@@ -85,6 +102,26 @@ class SDPADecoderLayer(nn.Module):
         pooled = F.adaptive_avg_pool1d(x.transpose(1, 2), keep).transpose(1, 2)
         return pooled
 
+    def _materialize_past(
+        self,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | RingKVCacheView,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Materialize ordered past K/V tensors from cache representation.
+
+        Args:
+            past_key_value: Either dense ordered past tensors or ring-buffer view.
+
+        Returns:
+            Ordered past key and value tensors.
+        """
+        if isinstance(past_key_value, RingKVCacheView):
+            positions = past_key_value.positions
+            return (
+                past_key_value.keys.index_select(1, positions),
+                past_key_value.values.index_select(1, positions),
+            )
+        return past_key_value
+
     def forward(
         self,
         *,
@@ -93,7 +130,7 @@ class SDPADecoderLayer(nn.Module):
         self_attn_mask: torch.Tensor | None = None,
         self_is_causal: bool = False,
         rotary_freqs_tgt: torch.Tensor | None = None,
-        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | RingKVCacheView | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         x = tgt
 
@@ -107,7 +144,7 @@ class SDPADecoderLayer(nn.Module):
         if rotary_freqs_tgt is not None:
             q, k = apply_rotary_pos_emb(q, k, rotary_freqs_tgt)
         if past_key_value is not None:
-            past_k, past_v = past_key_value
+            past_k, past_v = self._materialize_past(past_key_value)
             k = torch.cat([past_k, k], dim=1)
             v = torch.cat([past_v, v], dim=1)
         present_key_value = (k, v)
@@ -236,7 +273,7 @@ class VARTransformer(nn.Module):
         cfg_scale: float = 1.0,
         return_early_outputs: bool = False,
         compact_memory_for_final_level: bool = True,
-        past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+        past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None = None,
         use_cache: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
         if cfg_scale != 1.0 and prefix_inputs:
@@ -326,7 +363,11 @@ class VARTransformer(nn.Module):
         x = x + self.scale_embedding.weight[target_idx].view(1, 1, -1)
         past_len = 0
         if past_key_values is not None and len(past_key_values) > 0:
-            past_len = int(past_key_values[0][0].shape[1])
+            first_past = past_key_values[0]
+            if isinstance(first_past, RingKVCacheView):
+                past_len = int(first_past.positions.shape[0])
+            else:
+                past_len = int(first_past[0].shape[1])
         rotary_freqs_tgt = self.rotary_emb(x, target_len, start_pos=past_len)
 
         # Keep attn_mask=None so SDPA can stay on Flash Attention kernels.
