@@ -8,6 +8,7 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
     def __init__(self, hidden: int, num_heads: int) -> None:
         super().__init__(hidden=hidden, num_heads=num_heads, mlp_ratio=1.0, dropout=0.0)
         self.masks: list[torch.Tensor | None] = []
+        self.causal_flags: list[bool] = []
 
     def forward(
         self,
@@ -19,8 +20,9 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         rotary_freqs_tgt: torch.Tensor | None = None,
         past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        del memory, self_is_causal, rotary_freqs_tgt
+        del memory, rotary_freqs_tgt
         self.masks.append(self_attn_mask)
+        self.causal_flags.append(self_is_causal)
         if past_key_value is None:
             b, l, _ = tgt.shape
             empty = torch.empty((b, l, self.num_heads, self.head_dim), dtype=tgt.dtype, device=tgt.device)
@@ -28,7 +30,7 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         return tgt, past_key_value
 
 
-def test_prefix_uses_local_bidirectional_mask_when_radius_enabled() -> None:
+def test_prefix_uses_sliding_window_causal_attention_when_radius_enabled() -> None:
     cfg = VARConfig(
         level_vocab_sizes=(32, 64),
         level_lengths=(4, 4),
@@ -47,14 +49,10 @@ def test_prefix_uses_local_bidirectional_mask_when_radius_enabled() -> None:
     current_tokens = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
     _ = model(prefix_tokens, target_level=1, current_level_input=current_tokens)
 
-    assert len(capture_layer.masks) == 2
-    prefix_mask = capture_layer.masks[0]
-    final_mask = capture_layer.masks[1]
-    assert prefix_mask is not None
-    assert tuple(prefix_mask.shape) == (1, 1, 4, 4)
-    assert bool(prefix_mask[0, 0, 0, 3])
-    assert bool(prefix_mask[0, 0, 3, 0])
-    assert final_mask is None
+    assert len(capture_layer.masks) == 5
+    assert all(mask is None for mask in capture_layer.masks)
+    assert capture_layer.causal_flags[:4] == [True, True, True, True]
+    assert capture_layer.causal_flags[4] is True
 
 
 def test_prefix_mask_disabled_when_radius_zero() -> None:
@@ -78,6 +76,7 @@ def test_prefix_mask_disabled_when_radius_zero() -> None:
 
     assert len(capture_layer.masks) == 2
     assert capture_layer.masks[0] is None
+    assert capture_layer.causal_flags[0] is False
 
 
 def test_decoder_layer_returns_concatenated_kv_cache() -> None:
