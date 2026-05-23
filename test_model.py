@@ -16,10 +16,16 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         memory: torch.Tensor,
         self_attn_mask: torch.Tensor | None = None,
         self_is_causal: bool = False,
-    ) -> torch.Tensor:
-        del memory, self_is_causal
+        rotary_freqs_tgt: torch.Tensor | None = None,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        del memory, self_is_causal, rotary_freqs_tgt
         self.masks.append(self_attn_mask)
-        return tgt
+        if past_key_value is None:
+            b, l, _ = tgt.shape
+            empty = torch.empty((b, l, self.num_heads, self.head_dim), dtype=tgt.dtype, device=tgt.device)
+            return tgt, (empty, empty)
+        return tgt, past_key_value
 
 
 def test_prefix_uses_local_bidirectional_mask_when_radius_enabled() -> None:
@@ -72,3 +78,17 @@ def test_prefix_mask_disabled_when_radius_zero() -> None:
 
     assert len(capture_layer.masks) == 2
     assert capture_layer.masks[0] is None
+
+
+def test_decoder_layer_returns_concatenated_kv_cache() -> None:
+    layer = SDPADecoderLayer(hidden=8, num_heads=2, mlp_ratio=1.0, dropout=0.0).eval()
+    tgt = torch.randn(1, 2, 8)
+    memory = torch.randn(1, 3, 8)
+    past_k = torch.randn(1, 4, 2, 4)
+    past_v = torch.randn(1, 4, 2, 4)
+
+    _, present = layer(tgt=tgt, memory=memory, past_key_value=(past_k, past_v))
+    present_k, present_v = present
+
+    assert tuple(present_k.shape) == (1, 6, 2, 4)
+    assert tuple(present_v.shape) == (1, 6, 2, 4)

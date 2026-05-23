@@ -64,6 +64,48 @@ def _decode_next_ar_token(
     )
 
 
+def _truncate_past_key_values(
+    past_key_values: list[tuple[torch.Tensor, torch.Tensor]],
+    *,
+    max_local_window: int,
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    return [
+        (key[:, -max_local_window:, :, :], value[:, -max_local_window:, :, :])
+        for key, value in past_key_values
+    ]
+
+
+def _decode_next_ar_token_with_cache(
+    model: VARTransformer,
+    *,
+    prefix_inputs: list[torch.Tensor],
+    target_level: int,
+    token_input: torch.Tensor,
+    cfg_scale: float,
+    alpha: float,
+    healthy_entropy_limit: float,
+    past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None,
+    max_local_window: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+    logits, present_key_values = model(
+        prefix_inputs=prefix_inputs,
+        target_level=target_level,
+        current_level_input=token_input,
+        cfg_scale=cfg_scale,
+        past_key_values=past_key_values,
+        use_cache=True,
+    )
+    next_token, entropy, chaos = thermodynamic_sampling_with_stats(
+        logits[:, -1, :], alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+    )
+    return (
+        next_token,
+        entropy,
+        chaos,
+        _truncate_past_key_values(present_key_values, max_local_window=max_local_window),
+    )
+
+
 def _parallel_block_draft(
     model: VARTransformer,
     *,
@@ -191,8 +233,9 @@ def hybrid_cascade_decode(
     healthy_entropy_limit: float = 1.5,
     min_block_size_lvl2: int = 16,
     max_seams_per_inpaint_pass: int = 10,
+    bpe_chunk_length: int = 128,
 ) -> list[torch.Tensor]:
-
+    max_local_window = 1024
     batch = int(batch_size)
     out: list[torch.Tensor] = []
     conditioned_prefixes = prefix_inputs or []
@@ -250,17 +293,32 @@ def hybrid_cascade_decode(
             "[HYBRID] Фаза 2: AR продолжение структурного каркаса "
             f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
         )
-    for _ in range(lvl_1_sequence.shape[1], len_lvl_1):
-        next_token, _, _ = _decode_next_ar_token(
-            model,
-            prefix_inputs=[out[0]],
-            target_level=1,
-            sequence=lvl_1_sequence,
-            cfg_scale=cfg_scale,
-            alpha=alpha,
-            healthy_entropy_limit=healthy_entropy_limit,
-        )
-        lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)
+    past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+    chunk_size = max(1, int(bpe_chunk_length))
+    tokens_remaining = max(0, len_lvl_1 - lvl_1_sequence.shape[1])
+    num_chunks = (tokens_remaining + chunk_size - 1) // chunk_size
+    global_level_0_memory = out[0]
+    for chunk_idx in range(num_chunks):
+        chunk_start = lvl_1_sequence.shape[1]
+        chunk_end = min(len_lvl_1, chunk_start + chunk_size)
+        for _ in range(chunk_start, chunk_end):
+            token_input = (
+                torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=device)
+                if lvl_1_sequence.shape[1] == 0
+                else lvl_1_sequence[:, -1:].contiguous()
+            )
+            next_token, _, _, past_key_values = _decode_next_ar_token_with_cache(
+                model,
+                prefix_inputs=[global_level_0_memory],
+                target_level=1,
+                token_input=token_input,
+                cfg_scale=cfg_scale,
+                alpha=alpha,
+                healthy_entropy_limit=healthy_entropy_limit,
+                past_key_values=past_key_values,
+                max_local_window=max_local_window,
+            )
+            lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)
     if len(out) < 2:
         out.append(lvl_1_sequence)
     else:
