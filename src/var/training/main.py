@@ -286,8 +286,8 @@ def run_training(cfg: TrainConfig) -> Path:
         shuffle=not isinstance(dataset, MultiscaleTokenChunkIterableDataset),
         collate_fn=_collate_tokens,
         pin_memory=bool(cfg.pin_memory),
-        num_workers=4,
-        persistent_workers=True,
+        num_workers=cfg.train_num_workers,
+        persistent_workers=cfg.train_num_workers > 0,
     )
 
     val_dataloader = None
@@ -300,8 +300,8 @@ def run_training(cfg: TrainConfig) -> Path:
                 shuffle=False,
                 collate_fn=_collate_tokens,
                 pin_memory=bool(cfg.pin_memory),
-                num_workers=2,
-                persistent_workers=True,
+                num_workers=cfg.val_num_workers,
+                persistent_workers=cfg.val_num_workers > 0,
             )
 
     writer = SummaryWriter(log_dir=str(cfg.log_dir)) if cfg.tensorboard_enabled else None

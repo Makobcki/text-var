@@ -19,6 +19,8 @@ def test_config_loads_monitoring_fields(tmp_path: Path) -> None:
         "wandb_enabled": True,
         "wandb_project": "demo",
         "wandb_run_name": "run-1",
+        "train_num_workers": 6,
+        "val_num_workers": 3,
     }
     cfg_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -32,6 +34,8 @@ def test_config_loads_monitoring_fields(tmp_path: Path) -> None:
     assert cfg.wandb_enabled is True
     assert cfg.wandb_project == "demo"
     assert cfg.wandb_run_name == "run-1"
+    assert cfg.train_num_workers == 6
+    assert cfg.val_num_workers == 3
 
 
 def test_norm_helpers_return_positive_values() -> None:

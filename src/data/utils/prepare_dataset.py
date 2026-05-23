@@ -58,28 +58,25 @@ def _downsample(token_ids: list[int], stride: int) -> list[int]:
 def _encode_multiscale(
     token_ids: list[int], *, level_lengths: tuple[int, ...], level_vocab_sizes: tuple[int, ...], eos_token_id: int
 ) -> list[list[int]]:
-    if len(level_lengths) != 3 or len(level_vocab_sizes) != 3:
-        raise ValueError("This pipeline expects exactly 3 token levels.")
+    if len(level_lengths) != len(level_vocab_sizes):
+        raise ValueError("level_lengths and level_vocab_sizes must have the same size.")
+    if not level_lengths:
+        raise ValueError("At least one token level is required.")
 
     token_ids_with_eos = _append_eos(token_ids, eos_token_id=eos_token_id)
-
-    # Coarse -> medium -> fine levels from a single BPE/WordPiece stream.
-    lvl0 = _fit_to_level(
-        _downsample(token_ids_with_eos, 4),
-        length=level_lengths[0],
-        vocab_size=level_vocab_sizes[0],
-    )
-    lvl1 = _fit_to_level(
-        _downsample(token_ids_with_eos, 2),
-        length=level_lengths[1],
-        vocab_size=level_vocab_sizes[1],
-    )
-    lvl2 = _fit_to_level(
-        token_ids_with_eos,
-        length=level_lengths[2],
-        vocab_size=level_vocab_sizes[2],
-    )
-    return [lvl0, lvl1, lvl2]
+    level_count = len(level_lengths)
+    encoded_levels: list[list[int]] = []
+    for level_idx, (level_length, vocab_size) in enumerate(zip(level_lengths, level_vocab_sizes)):
+        stride_power = max(0, level_count - level_idx - 1)
+        stride = 2**stride_power
+        encoded_levels.append(
+            _fit_to_level(
+                _downsample(token_ids_with_eos, stride),
+                length=level_length,
+                vocab_size=vocab_size,
+            )
+        )
+    return encoded_levels
 
 
 def process_single_line(
@@ -107,7 +104,7 @@ def process_single_line(
             "bytes_processed": len(line.encode("utf-8")),
         }
 
-    lvl0, lvl1, lvl2 = _encode_multiscale(
+    multiscale_tokens = _encode_multiscale(
         token_ids,
         level_lengths=level_lengths,
         level_vocab_sizes=level_vocab_sizes,
@@ -116,7 +113,7 @@ def process_single_line(
 
     return {
         "id": str(index),
-        "tokens": [lvl0, lvl1, lvl2],
+        "tokens": multiscale_tokens,
         "bytes_processed": len(line.encode("utf-8")),
     }
 
@@ -132,8 +129,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--field", type=str, default="content")
     parser.add_argument("--kind", type=str, default="vq")
-    parser.add_argument("--level-vocab-sizes", type=int, nargs=3, default=(4096, 2048, 32000))
-    parser.add_argument("--level-lengths", type=int, nargs=3, default=(32, 128, 1024))
+    parser.add_argument("--level-vocab-sizes", type=int, nargs="+", default=(4096, 2048, 32000))
+    parser.add_argument("--level-lengths", type=int, nargs="+", default=(32, 128, 1024))
     parser.add_argument("--codebook-dim", type=int, default=256)
     parser.add_argument("--tokenizer-name", type=str, default="bert-base-uncased")
     parser.add_argument("--eos-token-id", type=int, default=2)

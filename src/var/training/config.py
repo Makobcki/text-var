@@ -34,6 +34,8 @@ class TrainConfig:
     amp_dtype: Literal["bf16", "fp16"] = "bf16"
     compile_enabled: bool = False
     pin_memory: bool = True
+    train_num_workers: int = 4
+    val_num_workers: int = 2
     grad_accum_steps: int = 1
     flash_cross_entropy: bool = True
     use_early_exit_loss: bool = False
@@ -118,6 +120,8 @@ def load_train_config(path: Path) -> TrainConfig:
         amp_dtype=str(data.get("amp_dtype", "bf16")).lower(),
         compile_enabled=bool(data.get("compile_enabled", False)),
         pin_memory=bool(data.get("pin_memory", True)),
+        train_num_workers=max(0, int(data.get("train_num_workers", 4))),
+        val_num_workers=max(0, int(data.get("val_num_workers", 2))),
         grad_accum_steps=max(1, int(data.get("grad_accum_steps", 1))),
         flash_cross_entropy=bool(data.get("flash_cross_entropy", True)),
         use_early_exit_loss=bool(data.get("use_early_exit_loss", False)),
