@@ -85,6 +85,7 @@ class SDPADecoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(hidden)
         self.norm3 = nn.LayerNorm(hidden)
         self.dropout = nn.Dropout(dropout)
+        self.attention_dropout = float(dropout)
 
     def _shape_heads(self, x: torch.Tensor) -> torch.Tensor:
         b, l, _ = x.shape
@@ -154,7 +155,7 @@ class SDPADecoderLayer(nn.Module):
             kh,
             vh,
             attn_mask=self_attn_mask,
-            dropout_p=0.0,
+            dropout_p=self.attention_dropout if self.training else 0.0,
             is_causal=self_is_causal and self_attn_mask is None,
         )
         x = x + self.dropout(self.self_out(self._merge_heads(self_attn)))
@@ -169,7 +170,7 @@ class SDPADecoderLayer(nn.Module):
             ckh,
             cvh,
             attn_mask=None,
-            dropout_p=0.0,
+            dropout_p=self.attention_dropout if self.training else 0.0,
             is_causal=False,
         )
         x = x + self.dropout(self.cross_out(self._merge_heads(cross_attn)))

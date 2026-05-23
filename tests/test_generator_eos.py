@@ -1,5 +1,6 @@
 import torch
 from src.var.generator import hybrid_cascade_decode
+from src.var.generator import _resolve_phase3_level2_length
 from src.var.training.config import VARConfig
 
 
@@ -92,3 +93,12 @@ def test_encode_multiscale_supports_dynamic_levels() -> None:
     assert levels[1][:3] == [1, 3, 5]
     assert levels[2][:4] == [1, 2, 3, 4]
     assert levels[3][:8] == [1, 2, 3, 4, 5, 6, 7, 2]
+
+
+def test_resolve_phase3_level2_length_scales_by_config_proportion() -> None:
+    resolved = _resolve_phase3_level2_length(
+        full_lvl_2_len=1024,
+        nominal_lvl_1_len=128,
+        actual_lvl_1_len=64,
+    )
+    assert resolved == 512

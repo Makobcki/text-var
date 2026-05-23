@@ -128,3 +128,8 @@ def test_rotary_embedding_uses_cache_position_offset() -> None:
     next_k_with_offset = cache_with_offset[0][0][:, -1]
     next_k_without_offset = cache_without_offset[0][0][:, -1]
     assert not torch.allclose(next_k_with_offset, next_k_without_offset)
+
+
+def test_decoder_layer_stores_configured_attention_dropout() -> None:
+    layer = SDPADecoderLayer(hidden=8, num_heads=2, mlp_ratio=1.0, dropout=0.25).train()
+    assert layer.attention_dropout == 0.25
