@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from src.var.checkpoint import load_checkpoint, restore_training_state, save_checkpoint
+from src.var.training.cli import build_parser
 from src.var.training.config import TrainConfig, load_train_config
 from src.var.loss import multiscale_next_scale_cross_entropy
 from src.var.model import VARTransformer

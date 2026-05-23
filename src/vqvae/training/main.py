@@ -1,4 +1,3 @@
-import argparse
 from pathlib import Path
 
 import torch
@@ -9,7 +8,10 @@ from src.data.token_cache import (
     TokenCacheMetadata,
     load_token_entries_from_directory,
 )
+from src.vqvae.checkpoint import save_vqvae_checkpoint
 from src.vqvae.model import SemanticTextVQVAE
+from src.vqvae.training.cli import build_parser
+from src.vqvae.training.config import VQVAETrainConfig
 
 
 def _collate_level(level_index: int):
@@ -76,9 +78,7 @@ def run_training(
         if not did_progress:
             raise RuntimeError("No valid token entries were loaded from token cache.")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
+    save_vqvae_checkpoint({
             "model": model.state_dict(),
             "steps": step,
             "metadata": TokenCacheMetadata(
@@ -90,37 +90,38 @@ def run_training(
             ).to_dict(),
             "source_token_cache": str(token_cache_dir),
             "level_index": int(level_index),
-        },
-        output_path,
-    )
+        }, output_path)
     print(f"[VQVAE] checkpoint saved: {output_path}")
     return output_path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Pretrain SemanticTextVQVAE")
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--token-cache-dir", type=Path, required=True)
-    parser.add_argument("--steps", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--vocab-size", type=int, default=0, help="0 = infer from token cache metadata")
-    parser.add_argument("--hidden-size", type=int, default=1024)
-    parser.add_argument("--semantic-tokens", type=int, default=4096)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--level-index", type=int, default=2, help="Which token level to train on")
+    """Run VQ-VAE training from CLI options."""
+    parser = build_parser()
     args = parser.parse_args()
-    run_training(
-        args.output,
-        args.token_cache_dir,
+    cfg = VQVAETrainConfig(
+        output=Path(args.output),
+        token_cache_dir=Path(args.token_cache_dir),
         steps=args.steps,
         batch_size=args.batch_size,
+        device=args.device,
         vocab_size=args.vocab_size,
         hidden_size=args.hidden_size,
         semantic_tokens=args.semantic_tokens,
         lr=args.lr,
-        device=args.device,
         level_index=args.level_index,
+    )
+    run_training(
+        cfg.output,
+        cfg.token_cache_dir,
+        steps=cfg.steps,
+        batch_size=cfg.batch_size,
+        vocab_size=cfg.vocab_size,
+        hidden_size=cfg.hidden_size,
+        semantic_tokens=cfg.semantic_tokens,
+        lr=cfg.lr,
+        device=cfg.device,
+        level_index=cfg.level_index,
     )
 
 

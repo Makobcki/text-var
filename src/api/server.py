@@ -1,5 +1,5 @@
 """OpenAI-compatible API server for TextVAR model."""
-#!/usr/bit/env python
+#!/usr/bin/env python
 
 import argparse
 import logging
@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from src.api.cli import build_parser
+from src.api.engine import GenerationParams, TextVAREngine
 from src.core.pipeline import PipelineConfig, TextVARPipeline
 from pydantic import BaseModel, Field
 
@@ -19,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 
 # Глобальный инстанс модели (чтобы загружать веса 1 раз)
 _pipeline: TextVARPipeline | None = None
+_engine: TextVAREngine | None = None
 
 
 # --- Pydantic Models for OpenAI API Contract ---
@@ -114,7 +117,7 @@ async def list_models() -> ModelList:
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResponse:
     """Generate chat response (transforms messages to flat prompt)."""
-    if _pipeline is None:
+    if _engine is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
     if request.stream:
@@ -125,7 +128,7 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
     prompt += "\nAssistant: "
 
     try:
-        generated_text = _pipeline.generate(prompt, max_new_tokens=request.max_tokens)
+        generated_text = _engine.generate(GenerationParams(prompt=prompt, max_tokens=request.max_tokens))
     except Exception as e:
         LOGGER.error(f"Generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -144,7 +147,7 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest) -> CompletionResponse:
     """Generate basic text completion."""
-    if _pipeline is None:
+    if _engine is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
     if request.stream:
@@ -153,7 +156,7 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
     prompt_str = request.prompt if isinstance(request.prompt, str) else request.prompt[0]
 
     try:
-        generated_text = _pipeline.generate(prompt_str, max_new_tokens=request.max_tokens)
+        generated_text = _engine.generate(GenerationParams(prompt=prompt_str, max_tokens=request.max_tokens))
     except Exception as e:
         LOGGER.error(f"Generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -171,17 +174,9 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
 
 
 def main() -> None:
-    global _pipeline
+    global _pipeline, _engine
 
-    parser = argparse.ArgumentParser(description="VAR OpenAI-Compatible API Server")
-    parser.add_argument("--vqvae-path", type=Path, required=True, help="Path to VQ-VAE checkpoint")
-    parser.add_argument("--var-path", type=Path, required=True, help="Path to VAR checkpoint")
-    parser.add_argument("--tokenizer", type=Path, required=True, help="Path to BPE tokenizer JSON")
-    parser.add_argument("--device", type=str, default="cuda", help="Execution device")
-    parser.add_argument("--max-bpe-len", type=int, default=128)
-    parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser = build_parser()
     args = parser.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -196,6 +191,7 @@ def main() -> None:
         max_bpe_len=args.max_bpe_len,
     )
     _pipeline = TextVARPipeline(cfg)
+    _engine = TextVAREngine(_pipeline)
     LOGGER.info("Models loaded successfully.")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
