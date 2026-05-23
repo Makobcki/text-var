@@ -345,6 +345,33 @@ def _inpaint_block_seams(
     return stitched
 
 
+def _resolve_phase3_level2_length(*, full_lvl_2_len: int, nominal_lvl_1_len: int, actual_lvl_1_len: int) -> int:
+    """Resolve target level-2 length for phase 3 based on configured level capacities.
+
+    Args:
+        full_lvl_2_len: Configured max token length for level 2.
+        nominal_lvl_1_len: Configured token length for level 1.
+        actual_lvl_1_len: Generated token length for level 1 before EOS.
+
+    Returns:
+        Non-zero target length for level 2 bounded by configuration.
+
+    Raises:
+        ValueError: If configured or generated lengths are invalid.
+    """
+    if full_lvl_2_len <= 0:
+        raise ValueError("level_lengths[2] must be positive.")
+    if nominal_lvl_1_len <= 0:
+        raise ValueError("level_lengths[1] must be positive.")
+    if actual_lvl_1_len < 0:
+        raise ValueError("actual level-1 length must be non-negative.")
+    if actual_lvl_1_len == 0:
+        return 1
+
+    scaled_len = (actual_lvl_1_len * full_lvl_2_len + nominal_lvl_1_len - 1) // nominal_lvl_1_len
+    return max(1, min(full_lvl_2_len, scaled_len))
+
+
 @torch.no_grad()
 def hybrid_cascade_decode(
     model: VARTransformer,
@@ -466,8 +493,11 @@ def hybrid_cascade_decode(
         out[1] = lvl_1_sequence
 
     full_lvl_2_len = model.cfg.level_lengths[2]
-    scale_factor = max(1, full_lvl_2_len // len_lvl_1)
-    len_lvl_2 = min(full_lvl_2_len, actual_lvl_1_len * scale_factor)
+    len_lvl_2 = _resolve_phase3_level2_length(
+        full_lvl_2_len=full_lvl_2_len,
+        nominal_lvl_1_len=len_lvl_1,
+        actual_lvl_1_len=actual_lvl_1_len,
+    )
     min_block = max(1, int(min_block_size_lvl2))
     block_count = max(1, min(actual_lvl_1_len, len_lvl_2 // min_block))
     block_size = max(min_block, len_lvl_2 // block_count)
