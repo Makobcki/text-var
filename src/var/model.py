@@ -16,8 +16,8 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
-    def forward(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
-        t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
+    def forward(self, x: torch.Tensor, seq_len: int, start_pos: int = 0) -> torch.Tensor:
+        t = torch.arange(start_pos, start_pos + seq_len, device=x.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         return torch.cat((freqs, freqs), dim=-1)
 
@@ -310,7 +310,10 @@ class VARTransformer(nn.Module):
             x = self.target_token.expand(b, target_len, -1)
 
         x = x + self.scale_embedding.weight[target_idx].view(1, 1, -1)
-        rotary_freqs_tgt = self.rotary_emb(x, target_len)
+        past_len = 0
+        if past_key_values is not None and len(past_key_values) > 0:
+            past_len = int(past_key_values[0][0].shape[1])
+        rotary_freqs_tgt = self.rotary_emb(x, target_len, start_pos=past_len)
 
         # Keep attn_mask=None so SDPA can stay on Flash Attention kernels.
         # Dense custom masks often force fallback to math backend with O(N^2) memory.
