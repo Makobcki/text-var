@@ -62,6 +62,39 @@ class CompletionRequest(BaseModel):
     stream: bool = False
 
 
+def _build_chat_prompt(messages: list[ChatMessage]) -> str:
+    """Build a ChatML-like prompt from chat messages.
+
+    Args:
+        messages: Chronological chat messages.
+
+    Returns:
+        Prompt string ready for model generation.
+    """
+    prompt_parts = [f"<|im_start|>{msg.role}\n{msg.content}<|im_end|>" for msg in messages]
+    prompt_parts.append("<|im_start|>assistant\n")
+    return "\n".join(prompt_parts)
+
+
+def _normalize_prompts(prompt: str | list[str]) -> list[str]:
+    """Normalize completion prompts to a non-empty list.
+
+    Args:
+        prompt: Either single prompt string or prompt batch.
+
+    Returns:
+        A list of prompts preserving input order.
+
+    Raises:
+        ValueError: If the prompt batch is empty.
+    """
+    if isinstance(prompt, str):
+        return [prompt]
+    if not prompt:
+        raise ValueError("Prompt list cannot be empty.")
+    return prompt
+
+
 class ChatChoice(BaseModel):
     index: int
     message: ChatMessage
@@ -123,9 +156,7 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
     if request.stream:
         raise HTTPException(status_code=501, detail="Streaming is not implemented yet.")
 
-    # Простой конвертер истории чата в текст (пока без сложных chat templates)
-    prompt = "\n".join([f"{msg.role.capitalize()}: {msg.content}" for msg in request.messages])
-    prompt += "\nAssistant: "
+    prompt = _build_chat_prompt(request.messages)
 
     try:
         generated_text = _engine.generate(GenerationParams(prompt=prompt, max_tokens=request.max_tokens))
@@ -153,10 +184,14 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
     if request.stream:
         raise HTTPException(status_code=501, detail="Streaming is not implemented yet.")
 
-    prompt_str = request.prompt if isinstance(request.prompt, str) else request.prompt[0]
-
     try:
-        generated_text = _engine.generate(GenerationParams(prompt=prompt_str, max_tokens=request.max_tokens))
+        prompts = _normalize_prompts(request.prompt)
+        generated_texts = [
+            _engine.generate(GenerationParams(prompt=prompt, max_tokens=request.max_tokens))
+            for prompt in prompts
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
         LOGGER.error(f"Generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -165,7 +200,10 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
         id=f"cmpl-{uuid.uuid4().hex[:12]}",
         created=int(time.time()),
         model=request.model,
-        choices=[CompletionChoice(text=generated_text, index=0)],
+        choices=[
+            CompletionChoice(text=generated_text, index=index)
+            for index, generated_text in enumerate(generated_texts)
+        ],
         usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     )
 
