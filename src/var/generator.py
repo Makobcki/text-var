@@ -1,3 +1,5 @@
+from typing import Union
+
 import torch
 import torch.nn.functional as F
 
@@ -70,11 +72,28 @@ class KVCacheRingBuffer:
         self._lengths[layer_idx] = min(self.max_window, self._lengths[layer_idx] + 1)
 
 
+def _to_batch_vector(
+    value: Union[float, torch.Tensor],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Convert scalar or tensor sampling argument to a batch-aligned vector."""
+    if isinstance(value, torch.Tensor):
+        if value.ndim == 0:
+            return value.to(device=device, dtype=dtype).repeat(batch_size)
+        if value.ndim != 1 or value.shape[0] != batch_size:
+            raise ValueError("Expected a [batch_size] tensor for per-sample sampling arguments.")
+        return value.to(device=device, dtype=dtype)
+    return torch.full((batch_size,), float(value), device=device, dtype=dtype)
+
+
 def thermodynamic_sampling_with_stats(
     logits: torch.Tensor,
     alpha: float = 1.0,
-    temperature: float = 1.0,
-    top_p: float = 1.0,
+    temperature: Union[float, torch.Tensor] = 1.0,
+    top_p: Union[float, torch.Tensor] = 1.0,
     t_min: float = 0.1,
     t_max: float = 2.0,
     healthy_entropy_limit: float = 1.5,
@@ -93,12 +112,23 @@ def thermodynamic_sampling_with_stats(
     t_dynamic = t_min + (t_base - t_min) * chaos_penalty
     t_dynamic = torch.clamp(t_dynamic, min=t_min, max=t_max).unsqueeze(-1)
 
-    scaled_logits = (logits / max(temperature, 1e-5)) / t_dynamic
-    if 0.0 < top_p < 1.0:
+    batch_size = logits.shape[0]
+    temperatures = torch.clamp(
+        _to_batch_vector(temperature, batch_size=batch_size, device=logits.device, dtype=logits.dtype),
+        min=1e-5,
+    ).unsqueeze(-1)
+    top_ps = torch.clamp(
+        _to_batch_vector(top_p, batch_size=batch_size, device=logits.device, dtype=logits.dtype),
+        min=0.0,
+        max=1.0,
+    )
+
+    scaled_logits = (logits / temperatures) / t_dynamic
+    if bool(torch.any((top_ps > 0.0) & (top_ps < 1.0)).item()):
         sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
         sorted_probs = F.softmax(sorted_logits, dim=-1)
         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-        remove_mask = cumulative_probs > top_p
+        remove_mask = cumulative_probs > top_ps.unsqueeze(-1)
         remove_mask[..., 1:] = remove_mask[..., :-1].clone()
         remove_mask[..., 0] = False
         sorted_logits = sorted_logits.masked_fill(remove_mask, float("-inf"))
@@ -117,8 +147,8 @@ def _decode_next_ar_token(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: float,
-    top_p: float,
+    temperature: Union[float, torch.Tensor],
+    top_p: Union[float, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch = sequence.shape[0]
     bos = torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=sequence.device)
@@ -149,8 +179,8 @@ def _decode_next_ar_token_with_cache(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: float,
-    top_p: float,
+    temperature: Union[float, torch.Tensor],
+    top_p: Union[float, torch.Tensor],
     past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None,
     cache_ring_buffer: KVCacheRingBuffer,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
@@ -189,8 +219,8 @@ def _parallel_block_draft(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: float,
-    top_p: float,
+    temperature: Union[float, torch.Tensor],
+    top_p: Union[float, torch.Tensor],
     rollback_chaos_threshold: float = 0.75,
 ) -> torch.Tensor:
     lvl_2_tokens = torch.full((batch_size, len_lvl_2), model.cfg.pad_token_id, dtype=torch.long, device=device)
@@ -238,8 +268,8 @@ def _inpaint_block_seams(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: float,
-    top_p: float,
+    temperature: Union[float, torch.Tensor],
+    top_p: Union[float, torch.Tensor],
     seam_tokens: int = 3,
     max_seams_per_pass: int = 10,
 ) -> torch.Tensor:
@@ -310,8 +340,8 @@ def hybrid_cascade_decode(
     cfg_scale: float = 1.0,
     alpha: float = 1.0,
     healthy_entropy_limit: float = 1.5,
-    temperature: float = 1.0,
-    top_p: float = 1.0,
+    temperature: Union[float, torch.Tensor] = 1.0,
+    top_p: Union[float, torch.Tensor] = 1.0,
     min_block_size_lvl2: int = 16,
     max_seams_per_inpaint_pass: int = 10,
     bpe_chunk_length: int = 128,

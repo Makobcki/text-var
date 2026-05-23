@@ -94,6 +94,8 @@ class TextVARPipeline:
         max_new_tokens: int = 50,
         temperature: float = 1.0,
         top_p: float = 1.0,
+        per_item_temperatures: list[float] | None = None,
+        per_item_top_ps: list[float] | None = None,
     ) -> list[str]:
         """Generate text continuations for a batch of prompts.
 
@@ -102,6 +104,8 @@ class TextVARPipeline:
             max_new_tokens: Maximum output token length after latent decoding.
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
+            per_item_temperatures: Optional per-request temperatures.
+            per_item_top_ps: Optional per-request top-p values.
 
         Returns:
             Generated text strings preserving input order.
@@ -111,6 +115,10 @@ class TextVARPipeline:
         """
         if not prompts:
             raise ValueError("Prompt list cannot be empty.")
+        if per_item_temperatures is not None and len(per_item_temperatures) != len(prompts):
+            raise ValueError("per_item_temperatures length must match prompts length.")
+        if per_item_top_ps is not None and len(per_item_top_ps) != len(prompts):
+            raise ValueError("per_item_top_ps length must match prompts length.")
 
         encoded = self._tokenizer(
             prompts,
@@ -124,13 +132,23 @@ class TextVARPipeline:
 
         latent_context, _ = self._vqvae.encode_sentence(bpe_tokens, padding_mask=padding_mask)
         semantic_prefix = latent_context.view(latent_context.shape[0], -1).long()
+        sampling_temperatures = (
+            torch.tensor(per_item_temperatures, dtype=torch.float32, device=self._device)
+            if per_item_temperatures is not None
+            else temperature
+        )
+        sampling_top_ps = (
+            torch.tensor(per_item_top_ps, dtype=torch.float32, device=self._device)
+            if per_item_top_ps is not None
+            else top_p
+        )
         generated_levels = hybrid_cascade_decode(
             self._var_model,
             batch_size=bpe_tokens.shape[0],
             device=self._device,
             prefix_inputs=[semantic_prefix],
-            temperature=temperature,
-            top_p=top_p,
+            temperature=sampling_temperatures,
+            top_p=sampling_top_ps,
         )
 
         decoded_bpe = self._vqvae.decode_from_semantic_indices(

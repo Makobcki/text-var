@@ -77,19 +77,21 @@ class TextVAREngine:
         Returns:
             Generated text preserving the original request ordering.
         """
-        grouped: Dict[Tuple[int, float, float], List[Tuple[int, GenerationParams]]] = {}
+        grouped: Dict[int, List[Tuple[int, GenerationParams]]] = {}
         for index, params in enumerate(params_list):
-            key = (params.max_tokens, params.temperature, params.top_p)
+            key = params.max_tokens
             grouped.setdefault(key, []).append((index, params))
 
         results: list[str] = [""] * len(params_list)
-        for (max_tokens, temperature, top_p), grouped_items in grouped.items():
+        for max_tokens, grouped_items in grouped.items():
             prompts = [item.prompt for _, item in grouped_items]
+            temperatures = [item.temperature for _, item in grouped_items]
+            top_ps = [item.top_p for _, item in grouped_items]
             outputs = self._pipeline.generate_batch(
                 prompts,
                 max_new_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
+                per_item_temperatures=temperatures,
+                per_item_top_ps=top_ps,
             )
             for output_idx, (original_idx, _) in enumerate(grouped_items):
                 results[original_idx] = outputs[output_idx]
