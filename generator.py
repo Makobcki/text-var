@@ -294,6 +294,8 @@ def hybrid_cascade_decode(
             f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
         )
     past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+    finished = torch.zeros(batch, dtype=torch.bool, device=device)
+    actual_lvl_1_len = len_lvl_1
     chunk_size = max(1, int(bpe_chunk_length))
     tokens_remaining = max(0, len_lvl_1 - lvl_1_sequence.shape[1])
     num_chunks = (tokens_remaining + chunk_size - 1) // chunk_size
@@ -318,15 +320,24 @@ def hybrid_cascade_decode(
                 past_key_values=past_key_values,
                 max_local_window=max_local_window,
             )
+            is_eos = next_token == int(model.cfg.eos_token_id)
+            finished |= is_eos
             lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)
+            if finished.all():
+                actual_lvl_1_len = lvl_1_sequence.shape[1]
+                break
+        if finished.all():
+            break
     if len(out) < 2:
         out.append(lvl_1_sequence)
     else:
         out[1] = lvl_1_sequence
 
-    len_lvl_2 = model.cfg.level_lengths[2]
+    full_lvl_2_len = model.cfg.level_lengths[2]
+    scale_factor = max(1, full_lvl_2_len // len_lvl_1)
+    len_lvl_2 = min(full_lvl_2_len, actual_lvl_1_len * scale_factor)
     min_block = max(1, int(min_block_size_lvl2))
-    block_count = max(1, min(len_lvl_1, len_lvl_2 // min_block))
+    block_count = max(1, min(actual_lvl_1_len, len_lvl_2 // min_block))
     block_size = max(min_block, len_lvl_2 // block_count)
 
     print(f"[HYBRID] Фаза 3.1: Параллельный драфт ({block_count} блоков, block_size={block_size})...")

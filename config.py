@@ -21,6 +21,7 @@ class VARConfig:
     exit_layers: tuple[int, ...] = (4, 8, 12)  # Слои Early Exit
     pad_token_id: int = 0
     mask_token_id: int = 1  # Используется для NAR генерации
+    eos_token_id: int = 2
     gradient_checkpointing: bool = False
     local_attention_radius: int = 0
 
@@ -36,6 +37,7 @@ class VARConfig:
             exit_layers=tuple(int(v) for v in data.get("exit_layers", (4, 8, 12))),
             pad_token_id=int(data.get("pad_token_id", 0)),
             mask_token_id=int(data.get("mask_token_id", 1)),
+            eos_token_id=int(data.get("eos_token_id", 2)),
             gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
             local_attention_radius=int(data.get("local_attention_radius", 0)),
         )
