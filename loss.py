@@ -45,6 +45,7 @@ def multiscale_next_scale_cross_entropy(
     corruption_span_max: int = 64,
     masked_loss_weight: float = 0.85,
     use_early_exit_loss: bool = False,
+    historical_level0_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     def _build_span_mask(
         batch: int,
@@ -76,6 +77,13 @@ def multiscale_next_scale_cross_entropy(
 
     for target_idx in range(len(moved_tokens)):
         prefix_inputs = moved_tokens[:target_idx]
+        if (
+            historical_level0_tokens is not None
+            and target_idx > 0
+            and prefix_inputs
+            and historical_level0_tokens.numel() > 0
+        ):
+            prefix_inputs = [torch.cat([historical_level0_tokens, prefix_inputs[0]], dim=1)] + prefix_inputs[1:]
         target = moved_tokens[target_idx]
         model_input = target
         mask_positions = None
