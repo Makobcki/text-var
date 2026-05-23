@@ -3,9 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-
-from rewrite_cache_with_vqvae import rewrite_cache_with_vqvae
 from src.data.token_cache import TokenCacheMetadata, save_token_cache_metadata
+from src.data.utils.rewrite_cache_with_vqvae import rewrite_cache_with_vqvae
 from src.vqvae.model import SemanticTextVQVAE
 
 
@@ -29,7 +28,10 @@ def test_rewrite_lvl0_from_lvl2(tmp_path: Path) -> None:
         {
             "metadata": metadata.to_dict(),
             "entries": [
-                {"id": "sample-1", "tokens": [original_lvl0.clone(), torch.tensor([0, 1]), lvl2.clone()]}
+                {
+                    "id": "sample-1",
+                    "tokens": [original_lvl0.clone(), torch.tensor([0, 1]), lvl2.clone()],
+                }
             ],
         },
         chunk_path,

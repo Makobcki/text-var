@@ -1,10 +1,9 @@
 from pathlib import Path
 
 import torch
-
 from src.core.pipeline import PipelineConfig, TextVARPipeline
-from src.vqvae.model import SemanticTextVQVAE
 from src.var.generator import RollbackEvent, _parallel_block_draft
+from src.vqvae.model import SemanticTextVQVAE
 
 
 class _DummyTokenizer:
@@ -29,7 +28,14 @@ class _DummyVQVAE(torch.nn.Module):
         batch = bpe_tokens.shape[0]
         return torch.zeros((batch, 1), dtype=torch.long), torch.tensor(0.0)
 
-    def decode_from_semantic_indices(self, semantic_indices: torch.Tensor, *, max_length: int, bos_token_id: int, eos_token_id: int | None = None):
+    def decode_from_semantic_indices(
+        self,
+        semantic_indices: torch.Tensor,
+        *,
+        max_length: int,
+        bos_token_id: int,
+        eos_token_id: int | None = None,
+    ):
         del semantic_indices, eos_token_id
         return torch.full((1, max_length), bos_token_id, dtype=torch.long)
 
@@ -48,7 +54,9 @@ def test_generate_flow(monkeypatch, tmp_path: Path) -> None:
     cfg.var_path.write_text("x", encoding="utf-8")
     cfg.bpe_tokenizer_path.write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(TextVARPipeline, "_load_tokenizer", staticmethod(lambda _: _DummyTokenizer()))
+    monkeypatch.setattr(
+        TextVARPipeline, "_load_tokenizer", staticmethod(lambda _: _DummyTokenizer())
+    )
     monkeypatch.setattr(TextVARPipeline, "_load_vqvae", lambda self, _: _DummyVQVAE())
     monkeypatch.setattr(TextVARPipeline, "_load_var", lambda self, _: _DummyVAR())
     capture: dict[str, torch.Tensor] = {}
@@ -59,7 +67,7 @@ def test_generate_flow(monkeypatch, tmp_path: Path) -> None:
         capture["prefix"] = prefix_inputs[0]
         return [torch.zeros((batch_size, 1), dtype=torch.long, device=device)]
 
-    monkeypatch.setattr("pipeline.hybrid_cascade_decode", _fake_decode)
+    monkeypatch.setattr("src.core.pipeline.hybrid_cascade_decode", _fake_decode)
 
     pipeline = TextVARPipeline(cfg)
     result = pipeline.generate("hello", max_new_tokens=4)
@@ -88,7 +96,9 @@ def test_load_var_uses_model_config(monkeypatch, tmp_path: Path) -> None:
     cfg.var_path.write_text("x", encoding="utf-8")
     cfg.bpe_tokenizer_path.write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(TextVARPipeline, "_load_tokenizer", staticmethod(lambda _: _DummyTokenizer()))
+    monkeypatch.setattr(
+        TextVARPipeline, "_load_tokenizer", staticmethod(lambda _: _DummyTokenizer())
+    )
     monkeypatch.setattr(TextVARPipeline, "_load_vqvae", lambda self, _: _DummyVQVAE())
 
     captured: dict[str, object] = {}
@@ -103,9 +113,9 @@ def test_load_var_uses_model_config(monkeypatch, tmp_path: Path) -> None:
             captured["state_dict"] = state_dict
             return self
 
-    monkeypatch.setattr("pipeline.VARTransformer", _FakeVAR)
+    monkeypatch.setattr("src.core.pipeline.VARTransformer", _FakeVAR)
     monkeypatch.setattr(
-        "pipeline.torch.load",
+        "src.core.pipeline.torch.load",
         lambda path, map_location: {
             "model": {"w": torch.tensor(1)},
             "model_config": {
@@ -160,7 +170,14 @@ def test_parallel_block_draft_raises_rollback_on_high_chaos(monkeypatch) -> None
     class _Model:
         cfg = _Cfg()
 
-        def __call__(self, prefix_inputs, target_level, current_level_input, cfg_scale, compact_memory_for_final_level):
+        def __call__(
+            self,
+            prefix_inputs,
+            target_level,
+            current_level_input,
+            cfg_scale,
+            compact_memory_for_final_level,
+        ):
             del prefix_inputs, target_level, cfg_scale, compact_memory_for_final_level
             batch, block_len = current_level_input.shape
             return torch.zeros((batch, block_len, 4), dtype=torch.float32)

@@ -1,7 +1,6 @@
 import torch
-
-from src.var.training.config import VARConfig
 from src.var.generator import hybrid_cascade_decode
+from src.var.training.config import VARConfig
 
 
 class _ToyModel:
@@ -49,10 +48,14 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
         draft_lengths.append(int(kwargs["len_lvl_2"]))
         return torch.zeros((1, kwargs["len_lvl_2"]), dtype=torch.long)
 
-    monkeypatch.setattr("generator._decode_next_ar_token", _fake_decode_no_cache)
-    monkeypatch.setattr("generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)
-    monkeypatch.setattr("generator._parallel_block_draft", _fake_parallel_block_draft)
-    monkeypatch.setattr("generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"])
+    monkeypatch.setattr("src.var.generator._decode_next_ar_token", _fake_decode_no_cache)
+    monkeypatch.setattr(
+        "src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache
+    )
+    monkeypatch.setattr("src.var.generator._parallel_block_draft", _fake_parallel_block_draft)
+    monkeypatch.setattr(
+        "src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"]
+    )
 
     output = hybrid_cascade_decode(model, batch_size=1, device=torch.device("cpu"))
 
@@ -62,7 +65,7 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
 
 
 def test_encode_multiscale_appends_eos() -> None:
-    from prepare_dataset import _encode_multiscale
+    from src.data.utils.prepare_dataset import _encode_multiscale
 
     levels = _encode_multiscale(
         [7, 8, 9],

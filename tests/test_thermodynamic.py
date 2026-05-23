@@ -1,6 +1,5 @@
 import torch
-
-from var_branch.model import thermodynamic_sampling
+from src.var.generator import thermodynamic_sampling_with_stats
 
 
 def test_mutation():
@@ -18,7 +17,9 @@ def test_mutation():
 
     # Тестируем уверенные логиты
     # Ожидаем, что температура упадет/приблизится к t_min, и сэмплер выберет строго токен 0
-    sampled_confident = thermodynamic_sampling(confident_logits, alpha=1.0, t_min=0.1, t_max=2.0)
+    sampled_confident, _, _ = thermodynamic_sampling_with_stats(
+        confident_logits, alpha=1.0, t_min=0.1, t_max=2.0
+    )
     print(f" Сэмплы при высокой уверенности (ожидаем [0, 0]): {sampled_confident.tolist()}")
 
     # Тестируем неуверенные логиты
@@ -26,8 +27,8 @@ def test_mutation():
     # Запустим 1000 раз, чтобы проверить вариативность (исследование латентного пространства)
     samples = []
     for _ in range(500):
-        s = thermodynamic_sampling(uncertain_logits, alpha=1.0, t_min=0.1, t_max=2.0)
-        samples.extend(s.flatten().tolist())
+        s = thermodynamic_sampling_with_stats(uncertain_logits, alpha=1.0, t_min=0.1, t_max=2.0)
+        samples.extend(s[1].flatten().tolist())
 
     unique_tokens = set(samples)
     print(f" Уникальные токены при сомнении (ожидаем разнообразие > 1 токена): {unique_tokens}")
