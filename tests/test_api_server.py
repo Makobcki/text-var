@@ -9,7 +9,7 @@ class DummyEngine:
     """Simple deterministic engine for API tests."""
 
     def generate(self, params):
-        return f"gen::{params.prompt}::{params.max_tokens}"
+        return f"gen::{params.prompt}::{params.max_tokens}::{params.temperature}::{params.top_p}"
 
     def generate_batch(self, params_list):
         return [self.generate(params) for params in params_list]
@@ -28,8 +28,22 @@ def test_completions_handles_prompt_batch() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert [choice["index"] for choice in payload["choices"]] == [0, 1]
-    assert payload["choices"][0]["text"] == "gen::first::3"
-    assert payload["choices"][1]["text"] == "gen::second::3"
+    assert payload["choices"][0]["text"] == "gen::first::3::1.0::1.0"
+    assert payload["choices"][1]["text"] == "gen::second::3::1.0::1.0"
+
+
+def test_completions_passes_sampling_params() -> None:
+    """Ensure completion endpoint forwards temperature and top_p to engine."""
+    server._engine = DummyEngine()
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/completions",
+        json={"prompt": "first", "max_tokens": 2, "temperature": 0.3, "top_p": 0.8},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["text"] == "gen::first::2::0.3::0.8"
 
 
 def test_completions_rejects_empty_prompt_batch() -> None:
