@@ -165,7 +165,7 @@ class VARTransformer(nn.Module):
                     hidden=hidden,
                     num_heads=int(cfg.num_heads),
                     mlp_ratio=float(cfg.mlp_ratio),
-                    dropout=0.1,
+                    dropout=float(cfg.dropout),
                 )
                 for _ in range(int(cfg.depth))
             ]
