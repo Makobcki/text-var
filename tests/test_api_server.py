@@ -11,6 +11,9 @@ class DummyEngine:
     def generate(self, params):
         return f"gen::{params.prompt}::{params.max_tokens}"
 
+    def generate_batch(self, params_list):
+        return [self.generate(params) for params in params_list]
+
 
 def test_completions_handles_prompt_batch() -> None:
     """Ensure /v1/completions returns one choice per prompt in batch order."""

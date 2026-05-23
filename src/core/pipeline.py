@@ -71,9 +71,30 @@ class TextVARPipeline:
             Decoded text string.
         """
 
+        generated_texts = self.generate_batch([prompt], max_new_tokens=max_new_tokens)
+        return generated_texts[0]
+
+    @torch.no_grad()
+    def generate_batch(self, prompts: list[str], max_new_tokens: int = 50) -> list[str]:
+        """Generate text continuations for a batch of prompts.
+
+        Args:
+            prompts: Ordered prompt strings for batched generation.
+            max_new_tokens: Maximum output token length after latent decoding.
+
+        Returns:
+            Generated text strings preserving input order.
+
+        Raises:
+            ValueError: If prompts is empty.
+        """
+        if not prompts:
+            raise ValueError("Prompt list cannot be empty.")
+
         encoded = self._tokenizer(
-            prompt,
+            prompts,
             return_tensors="pt",
+            padding=True,
             truncation=True,
             max_length=self._config.max_bpe_len,
         )
@@ -95,7 +116,7 @@ class TextVARPipeline:
             bos_token_id=self._tokenizer.bos_token_id or self._tokenizer.eos_token_id or 0,
             eos_token_id=self._tokenizer.eos_token_id,
         )
-        return self._tokenizer.decode(decoded_bpe[0].tolist(), skip_special_tokens=True)
+        return self._tokenizer.batch_decode(decoded_bpe.tolist(), skip_special_tokens=True)
 
     @staticmethod
     def _load_tokenizer(path: Path) -> PreTrainedTokenizerFast:

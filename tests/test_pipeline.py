@@ -10,16 +10,28 @@ class _DummyTokenizer:
     bos_token_id = 1
     eos_token_id = 2
 
-    def __call__(self, text: str, return_tensors: str, truncation: bool, max_length: int):
-        del text, return_tensors, truncation, max_length
+    def __call__(
+        self,
+        text: str | list[str],
+        return_tensors: str,
+        truncation: bool,
+        max_length: int,
+        padding: bool = False,
+    ):
+        del return_tensors, truncation, max_length, padding
+        batch_size = len(text) if isinstance(text, list) else 1
         return {
-            "input_ids": torch.tensor([[1, 7, 2]], dtype=torch.long),
-            "attention_mask": torch.tensor([[1, 1, 1]], dtype=torch.long),
+            "input_ids": torch.tensor([[1, 7, 2]] * batch_size, dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1]] * batch_size, dtype=torch.long),
         }
 
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
         del skip_special_tokens
         return "|".join(str(i) for i in ids)
+
+    def batch_decode(self, ids: list[list[int]], skip_special_tokens: bool = True) -> list[str]:
+        del skip_special_tokens
+        return ["|".join(str(i) for i in row) for row in ids]
 
 
 class _DummyVQVAE(torch.nn.Module):
