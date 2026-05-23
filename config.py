@@ -99,6 +99,7 @@ class TrainConfig:
     wandb_enabled: bool = False
     wandb_project: str = "text-var"
     wandb_run_name: Optional[str] = None
+    unconditional_drop_prob: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,7 @@ def load_train_config(path: Path) -> TrainConfig:
         wandb_enabled=bool(data.get("wandb_enabled", False)),
         wandb_project=str(data.get("wandb_project", "text-var")),
         wandb_run_name=str(data["wandb_run_name"]) if data.get("wandb_run_name") else None,
+        unconditional_drop_prob=min(1.0, max(0.0, float(data.get("unconditional_drop_prob", 0.1)))),
     )
 
 

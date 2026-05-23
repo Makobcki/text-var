@@ -11,6 +11,58 @@ class RollbackEvent(RuntimeError):
         self.block_end = block_end
 
 
+class KVCacheRingBuffer:
+    def __init__(self, max_window: int) -> None:
+        self.max_window = max(1, int(max_window))
+        self._keys: list[torch.Tensor] = []
+        self._values: list[torch.Tensor] = []
+        self._lengths: list[int] = []
+        self._write_ptrs: list[int] = []
+
+    def update(
+        self,
+        present_key_values: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        if not self._keys:
+            self._allocate(present_key_values)
+        for layer_idx, (key, value) in enumerate(present_key_values):
+            self._append_layer(layer_idx, key, value)
+        return self.materialize()
+
+    def materialize(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        ordered: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer_idx, key_buffer in enumerate(self._keys):
+            cur_len = self._lengths[layer_idx]
+            if cur_len == 0:
+                ordered.append((key_buffer[:, :0], self._values[layer_idx][:, :0]))
+                continue
+            if cur_len < self.max_window:
+                ordered.append((key_buffer[:, :cur_len], self._values[layer_idx][:, :cur_len]))
+                continue
+            ptr = self._write_ptrs[layer_idx]
+            ordered_key = torch.cat([key_buffer[:, ptr:], key_buffer[:, :ptr]], dim=1)
+            ordered_value = torch.cat([self._values[layer_idx][:, ptr:], self._values[layer_idx][:, :ptr]], dim=1)
+            ordered.append((ordered_key, ordered_value))
+        return ordered
+
+    def _allocate(self, present_key_values: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+        for key, value in present_key_values:
+            b, _, h, d = key.shape
+            self._keys.append(torch.empty((b, self.max_window, h, d), dtype=key.dtype, device=key.device))
+            self._values.append(torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device))
+            self._lengths.append(0)
+            self._write_ptrs.append(0)
+
+    def _append_layer(self, layer_idx: int, key: torch.Tensor, value: torch.Tensor) -> None:
+        step_tokens = key[:, -1:, :, :]
+        step_values = value[:, -1:, :, :]
+        write_ptr = self._write_ptrs[layer_idx]
+        self._keys[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_tokens
+        self._values[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_values
+        self._write_ptrs[layer_idx] = (write_ptr + 1) % self.max_window
+        self._lengths[layer_idx] = min(self.max_window, self._lengths[layer_idx] + 1)
+
+
 def thermodynamic_sampling_with_stats(
     logits: torch.Tensor,
     alpha: float = 1.0,
@@ -64,17 +116,6 @@ def _decode_next_ar_token(
     )
 
 
-def _truncate_past_key_values(
-    past_key_values: list[tuple[torch.Tensor, torch.Tensor]],
-    *,
-    max_local_window: int,
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    return [
-        (key[:, -max_local_window:, :, :], value[:, -max_local_window:, :, :])
-        for key, value in past_key_values
-    ]
-
-
 def _decode_next_ar_token_with_cache(
     model: VARTransformer,
     *,
@@ -85,7 +126,7 @@ def _decode_next_ar_token_with_cache(
     alpha: float,
     healthy_entropy_limit: float,
     past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None,
-    max_local_window: int,
+    cache_ring_buffer: KVCacheRingBuffer,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
     logits, present_key_values = model(
         prefix_inputs=prefix_inputs,
@@ -102,7 +143,7 @@ def _decode_next_ar_token_with_cache(
         next_token,
         entropy,
         chaos,
-        _truncate_past_key_values(present_key_values, max_local_window=max_local_window),
+        cache_ring_buffer.update(present_key_values),
     )
 
 
@@ -294,6 +335,7 @@ def hybrid_cascade_decode(
             f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
         )
     past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+    cache_ring_buffer = KVCacheRingBuffer(max_window=max_local_window)
     finished = torch.zeros(batch, dtype=torch.bool, device=device)
     actual_lvl_1_len = len_lvl_1
     chunk_size = max(1, int(bpe_chunk_length))
@@ -318,7 +360,7 @@ def hybrid_cascade_decode(
                 alpha=alpha,
                 healthy_entropy_limit=healthy_entropy_limit,
                 past_key_values=past_key_values,
-                max_local_window=max_local_window,
+                cache_ring_buffer=cache_ring_buffer,
             )
             is_eos = next_token == int(model.cfg.eos_token_id)
             finished |= is_eos
