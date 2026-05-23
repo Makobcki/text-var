@@ -75,3 +75,20 @@ def test_encode_multiscale_appends_eos() -> None:
     )
 
     assert levels[2] == [7, 8, 9, 2]
+
+
+def test_encode_multiscale_supports_dynamic_levels() -> None:
+    from src.data.utils.prepare_dataset import _encode_multiscale
+
+    levels = _encode_multiscale(
+        [1, 2, 3, 4, 5, 6, 7],
+        level_lengths=(2, 3, 4, 8),
+        level_vocab_sizes=(32, 32, 32, 32),
+        eos_token_id=2,
+    )
+
+    assert len(levels) == 4
+    assert levels[0][:2] == [1, 2]
+    assert levels[1][:3] == [1, 3, 5]
+    assert levels[2][:4] == [1, 2, 3, 4]
+    assert levels[3][:8] == [1, 2, 3, 4, 5, 6, 7, 2]
