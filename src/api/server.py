@@ -2,6 +2,7 @@
 #!/usr/bin/env python
 
 import argparse
+import json
 import logging
 import time
 import uuid
@@ -12,6 +13,8 @@ from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from src.api.cli import build_parser
 from src.api.engine import GenerationParams, TextVAREngine
 from src.core.pipeline import PipelineConfig, TextVARPipeline
@@ -153,16 +156,29 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
     if _engine is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
-    if request.stream:
-        raise HTTPException(status_code=501, detail="Streaming is not implemented yet.")
-
     prompt = _build_chat_prompt(request.messages)
 
+    params = GenerationParams(
+        prompt=prompt,
+        max_tokens=request.max_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+    )
     try:
-        generated_text = _engine.generate(GenerationParams(prompt=prompt, max_tokens=request.max_tokens))
+        generated_text = await run_in_threadpool(_engine.generate, params)
     except Exception as e:
         LOGGER.error(f"Generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+    if request.stream:
+        async def event_stream() -> AsyncGenerator[str, None]:
+            chunk = {"id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion.chunk", "created": int(time.time()), "model": request.model, "choices": [{"index": 0, "delta": {"role": "assistant", "content": generated_text}, "finish_reason": None}]}
+            yield f"data: {json.dumps(chunk)}\n\n"
+            done = {"id": chunk["id"], "object": "chat.completion.chunk", "created": chunk["created"], "model": request.model, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+            yield f"data: {json.dumps(done)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -181,21 +197,33 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
     if _engine is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
-    if request.stream:
-        raise HTTPException(status_code=501, detail="Streaming is not implemented yet.")
-
     try:
         prompts = _normalize_prompts(request.prompt)
         params_batch = [
-            GenerationParams(prompt=prompt, max_tokens=request.max_tokens)
+            GenerationParams(
+                prompt=prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+            )
             for prompt in prompts
         ]
-        generated_texts = _engine.generate_batch(params_batch)
+        generated_texts = await run_in_threadpool(_engine.generate_batch, params_batch)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
         LOGGER.error(f"Generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+    if request.stream:
+        async def event_stream() -> AsyncGenerator[str, None]:
+            event_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+            for index, generated_text in enumerate(generated_texts):
+                chunk = {"id": event_id, "object": "text_completion", "created": int(time.time()), "model": request.model, "choices": [{"text": generated_text, "index": index, "finish_reason": None}]}
+                yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return CompletionResponse(
         id=f"cmpl-{uuid.uuid4().hex[:12]}",

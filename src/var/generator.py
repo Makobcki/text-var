@@ -66,6 +66,8 @@ class KVCacheRingBuffer:
 def thermodynamic_sampling_with_stats(
     logits: torch.Tensor,
     alpha: float = 1.0,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
     t_min: float = 0.1,
     t_max: float = 2.0,
     healthy_entropy_limit: float = 1.5,
@@ -84,7 +86,16 @@ def thermodynamic_sampling_with_stats(
     t_dynamic = t_min + (t_base - t_min) * chaos_penalty
     t_dynamic = torch.clamp(t_dynamic, min=t_min, max=t_max).unsqueeze(-1)
 
-    scaled_logits = logits / t_dynamic
+    scaled_logits = (logits / max(temperature, 1e-5)) / t_dynamic
+    if 0.0 < top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
+        sorted_probs = F.softmax(sorted_logits, dim=-1)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        remove_mask = cumulative_probs > top_p
+        remove_mask[..., 1:] = remove_mask[..., :-1].clone()
+        remove_mask[..., 0] = False
+        sorted_logits = sorted_logits.masked_fill(remove_mask, float("-inf"))
+        scaled_logits = torch.full_like(scaled_logits, float("-inf")).scatter(-1, sorted_indices, sorted_logits)
     next_tokens = torch.distributions.Categorical(logits=scaled_logits).sample()
 
     return next_tokens, entropy, chaos_diff
@@ -99,6 +110,8 @@ def _decode_next_ar_token(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
+    temperature: float,
+    top_p: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch = sequence.shape[0]
     bos = torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=sequence.device)
@@ -112,7 +125,11 @@ def _decode_next_ar_token(
     )
     pos = sequence.shape[1]
     return thermodynamic_sampling_with_stats(
-        logits[:, pos, :], alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+        logits[:, pos, :],
+        alpha=alpha,
+        temperature=temperature,
+        top_p=top_p,
+        healthy_entropy_limit=healthy_entropy_limit,
     )
 
 
@@ -125,6 +142,8 @@ def _decode_next_ar_token_with_cache(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
+    temperature: float,
+    top_p: float,
     past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None,
     cache_ring_buffer: KVCacheRingBuffer,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
@@ -137,7 +156,11 @@ def _decode_next_ar_token_with_cache(
         use_cache=True,
     )
     next_token, entropy, chaos = thermodynamic_sampling_with_stats(
-        logits[:, -1, :], alpha=alpha, healthy_entropy_limit=healthy_entropy_limit
+        logits[:, -1, :],
+        alpha=alpha,
+        temperature=temperature,
+        top_p=top_p,
+        healthy_entropy_limit=healthy_entropy_limit,
     )
     return (
         next_token,
@@ -159,6 +182,8 @@ def _parallel_block_draft(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
+    temperature: float,
+    top_p: float,
     rollback_chaos_threshold: float = 0.75,
 ) -> torch.Tensor:
     lvl_2_tokens = torch.full((batch_size, len_lvl_2), model.cfg.pad_token_id, dtype=torch.long, device=device)
@@ -187,6 +212,8 @@ def _parallel_block_draft(
             logits.view(-1, logits.shape[-1]),
             alpha=alpha,
             healthy_entropy_limit=healthy_entropy_limit,
+            temperature=temperature,
+            top_p=top_p,
         )
         if float(chaos_diff.mean().item()) > float(rollback_chaos_threshold):
             raise RollbackEvent(start_idx, end_idx)
@@ -204,6 +231,8 @@ def _inpaint_block_seams(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
+    temperature: float,
+    top_p: float,
     seam_tokens: int = 3,
     max_seams_per_pass: int = 10,
 ) -> torch.Tensor:
@@ -250,6 +279,8 @@ def _inpaint_block_seams(
             masked_logits,
             alpha=alpha,
             healthy_entropy_limit=healthy_entropy_limit,
+            temperature=temperature,
+            top_p=top_p,
         )
         expanded[pos_rows, pos_cols] = sampled
 
@@ -272,6 +303,8 @@ def hybrid_cascade_decode(
     cfg_scale: float = 1.0,
     alpha: float = 1.0,
     healthy_entropy_limit: float = 1.5,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
     min_block_size_lvl2: int = 16,
     max_seams_per_inpaint_pass: int = 10,
     bpe_chunk_length: int = 128,
@@ -317,6 +350,8 @@ def hybrid_cascade_decode(
             cfg_scale=cfg_scale,
             alpha=alpha,
             healthy_entropy_limit=healthy_entropy_limit,
+            temperature=temperature,
+            top_p=top_p,
         )
         lvl_0_sequence = torch.cat([lvl_0_sequence, next_token.unsqueeze(1)], dim=1)
     if len(out) < 1:
@@ -359,6 +394,8 @@ def hybrid_cascade_decode(
                 cfg_scale=cfg_scale,
                 alpha=alpha,
                 healthy_entropy_limit=healthy_entropy_limit,
+                temperature=temperature,
+                top_p=top_p,
                 past_key_values=past_key_values,
                 cache_ring_buffer=cache_ring_buffer,
             )
@@ -395,6 +432,8 @@ def hybrid_cascade_decode(
             cfg_scale=cfg_scale,
             alpha=alpha,
             healthy_entropy_limit=healthy_entropy_limit,
+            temperature=temperature,
+            top_p=top_p,
         )
     except RollbackEvent as event:
         print(f"[HYBRID] rollback block=[{event.block_start}, {event.block_end}) -> conservative resample")
@@ -409,6 +448,8 @@ def hybrid_cascade_decode(
             cfg_scale=cfg_scale,
             alpha=max(0.25, alpha * 0.5),
             healthy_entropy_limit=healthy_entropy_limit,
+            temperature=temperature,
+            top_p=top_p,
             rollback_chaos_threshold=1.0,
         )
 
@@ -422,6 +463,8 @@ def hybrid_cascade_decode(
         cfg_scale=cfg_scale,
         alpha=alpha,
         healthy_entropy_limit=healthy_entropy_limit,
+        temperature=temperature,
+        top_p=top_p,
         max_seams_per_pass=max_seams_per_inpaint_pass,
     )
 

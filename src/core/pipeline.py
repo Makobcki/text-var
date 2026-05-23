@@ -60,27 +60,48 @@ class TextVARPipeline:
         return self._device
 
     @torch.no_grad()
-    def generate(self, prompt: str, max_new_tokens: int = 50) -> str:
+    def generate(
+        self,
+        prompt: str,
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+    ) -> str:
         """Generate text continuation from a prompt.
 
         Args:
             prompt: Input text prompt.
             max_new_tokens: Maximum output token length after latent decoding.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
 
         Returns:
             Decoded text string.
         """
 
-        generated_texts = self.generate_batch([prompt], max_new_tokens=max_new_tokens)
+        generated_texts = self.generate_batch(
+            [prompt],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
         return generated_texts[0]
 
     @torch.no_grad()
-    def generate_batch(self, prompts: list[str], max_new_tokens: int = 50) -> list[str]:
+    def generate_batch(
+        self,
+        prompts: list[str],
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+    ) -> list[str]:
         """Generate text continuations for a batch of prompts.
 
         Args:
             prompts: Ordered prompt strings for batched generation.
             max_new_tokens: Maximum output token length after latent decoding.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
 
         Returns:
             Generated text strings preserving input order.
@@ -108,6 +129,8 @@ class TextVARPipeline:
             batch_size=bpe_tokens.shape[0],
             device=self._device,
             prefix_inputs=[semantic_prefix],
+            temperature=temperature,
+            top_p=top_p,
         )
 
         decoded_bpe = self._vqvae.decode_from_semantic_indices(
