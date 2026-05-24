@@ -310,10 +310,10 @@ class VARTransformer(nn.Module):
 
     def _build_local_causal_mask(self, seq_len: int, radius: int, device: torch.device) -> torch.Tensor:
         """Create additive local causal mask for vectorized prefix attention."""
-        idx = torch.arange(seq_len, device=device)
-        col = idx.view(1, -1)
-        row = idx.view(-1, 1)
-        allow = (col <= row) & ((row - col) < max(1, radius))
+        effective_radius = max(1, radius)
+        allow = torch.ones((seq_len, seq_len), dtype=torch.bool, device=device)
+        allow = torch.tril(allow, diagonal=0)
+        allow = torch.triu(allow, diagonal=-(effective_radius - 1))
         mask = torch.full((seq_len, seq_len), float("-inf"), device=device)
         return mask.masked_fill(allow, 0.0)
 

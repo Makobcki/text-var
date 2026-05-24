@@ -132,3 +132,25 @@ def test_rotary_embedding_uses_cache_position_offset() -> None:
 def test_decoder_layer_stores_configured_attention_dropout() -> None:
     layer = SDPADecoderLayer(hidden=8, num_heads=2, mlp_ratio=1.0, dropout=0.25).train()
     assert layer.attention_dropout == 0.25
+
+
+def test_local_sliding_window_mask_uses_banded_causal_pattern() -> None:
+    cfg = VARConfig(
+        level_vocab_sizes=(16, 16),
+        level_lengths=(4, 4),
+        hidden_size=8,
+        depth=1,
+        num_heads=2,
+        mlp_ratio=1.0,
+        exit_layers=(),
+    )
+    model = VARTransformer(cfg).eval()
+    mask = model._build_local_causal_mask(seq_len=5, radius=2, device=torch.device("cpu"))
+
+    expected = torch.full((5, 5), float("-inf"))
+    expected[0, 0] = 0.0
+    expected[1, 0:2] = 0.0
+    expected[2, 1:3] = 0.0
+    expected[3, 2:4] = 0.0
+    expected[4, 3:5] = 0.0
+    assert torch.equal(mask, expected)
