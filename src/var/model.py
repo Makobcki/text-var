@@ -170,8 +170,10 @@ class SDPADecoderLayer(nn.Module):
         if bool(getattr(self, "use_turboquant", False)) and can_use_turboquant and self_attn_mask is None:
             assert past_key_value.codec is not None
             pk, pv, ks, vs, ksign, vsign = past_key_value.codec.quantized_view_payload(past_key_value)
-            kq_cur, ksc_cur, _, ksg_cur = past_key_value.codec._quantize_tensor(k, bits=past_key_value.codec.cfg.key_bits)
-            vq_cur, vsc_cur, _, vsg_cur = past_key_value.codec._quantize_tensor(v, bits=past_key_value.codec.cfg.value_bits)
+            step_k = k[:, -1:, :, :]
+            step_v = v[:, -1:, :, :]
+            kq_cur, ksc_cur, _, ksg_cur = past_key_value.codec._quantize_tensor(step_k, bits=past_key_value.codec.cfg.key_bits)
+            vq_cur, vsc_cur, _, vsg_cur = past_key_value.codec._quantize_tensor(step_v, bits=past_key_value.codec.cfg.value_bits)
             pk = torch.cat([pk, past_key_value.codec._pack_bits(kq_cur, past_key_value.codec.cfg.key_bits)], dim=1)
             pv = torch.cat([pv, past_key_value.codec._pack_bits(vq_cur, past_key_value.codec.cfg.value_bits)], dim=1)
             ks = torch.cat([ks, ksc_cur], dim=1)

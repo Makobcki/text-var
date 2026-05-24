@@ -222,6 +222,15 @@ def turboquant_attention(
     """
     q = inputs.q.contiguous()
     _validate_inputs_for_kernel(inputs=inputs, fallback_k=fallback_k, fallback_v=fallback_v)
+    if _should_use_safe_fallback(inputs):
+        return F.scaled_dot_product_attention(
+            q,
+            fallback_k.contiguous(),
+            fallback_v.contiguous(),
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=is_causal,
+        )
     k, v = _dequantize_kv(inputs=inputs, fallback_k=fallback_k, fallback_v=fallback_v)
     if triton is None or tl is None or (not q.is_cuda):
         return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=is_causal)
@@ -263,6 +272,18 @@ def _dequantize_kv(
     if inputs.v_qjl_signs is not None:
         v = v + _qjl_residual(inputs.v_qjl_signs, v_scale)
     return k.contiguous(), v.contiguous()
+
+
+def _should_use_safe_fallback(inputs: TurboQuantTritonInputs) -> bool:
+    """Return True when quantized tensors cannot be safely interpreted.
+
+    Args:
+        inputs: TurboQuant input bundle.
+
+    Returns:
+        Whether to force standard SDPA fallback.
+    """
+    return inputs.k_scales is None or inputs.v_scales is None or inputs.k_scales.numel() == 0 or inputs.v_scales.numel() == 0
 
 
 def _unpack_4bit_tensor(packed: torch.Tensor, output_dim: int) -> torch.Tensor:
@@ -371,8 +392,8 @@ def _launch_turboquant_kernel(
     grid = (triton.cdiv(seqlen_q, block_m), bsz * heads)
     k_scales = _reshape_scales(raw_inputs.k_scales, raw_inputs.k_quant) if raw_inputs.k_scales.numel() > 0 else torch.ones((*k.shape[:-1], 1), device=k.device, dtype=k.dtype)
     v_scales = _reshape_scales(raw_inputs.v_scales, raw_inputs.v_quant) if raw_inputs.v_scales.numel() > 0 else torch.ones((*v.shape[:-1], 1), device=v.device, dtype=v.dtype)
-    k_qjl = raw_inputs.k_qjl_signs.to(torch.int8) if raw_inputs.k_qjl_signs is not None else torch.ones_like(k, dtype=torch.int8)
-    v_qjl = raw_inputs.v_qjl_signs.to(torch.int8) if raw_inputs.v_qjl_signs is not None else torch.ones_like(v, dtype=torch.int8)
+    k_qjl = _safe_sign_tensor(raw_inputs.k_qjl_signs, k)
+    v_qjl = _safe_sign_tensor(raw_inputs.v_qjl_signs, v)
 
     _turboquant_fused_attention_kernel[grid](
         q,
@@ -427,6 +448,25 @@ def _launch_turboquant_kernel(
         BLOCK_D=head_dim,
     )
     return out
+
+
+def _safe_sign_tensor(signs: torch.Tensor | None, reference: torch.Tensor) -> torch.Tensor:
+    """Build an int8 sign tensor without unsafe casting from float payloads.
+
+    Args:
+        signs: Optional residual sign tensor.
+        reference: Tensor for target shape/device.
+
+    Returns:
+        Int8 sign tensor containing {-1, +1}.
+    """
+    if signs is None or signs.numel() == 0:
+        return torch.ones_like(reference, dtype=torch.int8)
+    if signs.dtype == torch.bool:
+        return torch.where(signs, 1, -1).to(dtype=torch.int8)
+    if signs.dtype.is_floating_point:
+        return torch.where(signs >= 0, 1, -1).to(dtype=torch.int8)
+    return torch.where(signs > 0, 1, -1).to(dtype=torch.int8)
 
 
 def turboquant_attention_causal(inputs: TurboQuantTritonInputs, *, fallback_k: torch.Tensor, fallback_v: torch.Tensor) -> torch.Tensor:
