@@ -51,12 +51,6 @@ _SUPPORTED_PACKED_BITS: Final[set[int]] = {4, 8}
 
 if triton is not None:
 
-    @triton.jit
-    def _unpack_4bit(packed, idx):  # pragma: no cover
-        byte = tl.load(packed + (idx // 2))
-        lo = byte & 0x0F
-        hi = (byte >> 4) & 0x0F
-        return tl.where((idx % 2) == 0, lo, hi)
 
     _AUTOTUNE_CONFIGS = [
         triton.Config({"BLOCK_M": 16, "BLOCK_N": 32}, num_warps=4, num_stages=3),
