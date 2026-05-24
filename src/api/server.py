@@ -3,18 +3,14 @@
 
 import argparse
 import asyncio
-import json
 import logging
 import time
-import uuid
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from src.api.cli import build_parser
 from src.api.engine import GenerationParams, TextVAREngine
@@ -255,14 +251,10 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
         raise HTTPException(status_code=500, detail=str(e))
 
     if request.stream:
-        async def event_stream() -> AsyncGenerator[str, None]:
-            chunk = {"id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion.chunk", "created": int(time.time()), "model": request.model, "choices": [{"index": 0, "delta": {"role": "assistant", "content": generated_text}, "finish_reason": None}]}
-            yield f"data: {json.dumps(chunk)}\n\n"
-            done = {"id": chunk["id"], "object": "chat.completion.chunk", "created": chunk["created"], "model": request.model, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
-            yield f"data: {json.dumps(done)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        raise HTTPException(
+            status_code=501,
+            detail="stream=True is not supported yet: token-level streaming generator is not implemented.",
+        )
 
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -302,14 +294,10 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
     if request.stream:
-        async def event_stream() -> AsyncGenerator[str, None]:
-            event_id = f"cmpl-{uuid.uuid4().hex[:12]}"
-            for index, generated_text in enumerate(generated_texts):
-                chunk = {"id": event_id, "object": "text_completion", "created": int(time.time()), "model": request.model, "choices": [{"text": generated_text, "index": index, "finish_reason": None}]}
-                yield f"data: {json.dumps(chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        raise HTTPException(
+            status_code=501,
+            detail="stream=True is not supported yet: token-level streaming generator is not implemented.",
+        )
 
     return CompletionResponse(
         id=f"cmpl-{uuid.uuid4().hex[:12]}",

@@ -333,6 +333,20 @@ def thermodynamic_sampling_with_stats(
     t_max: float = 2.0,
     healthy_entropy_limit: float = 1.5,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample next tokens with adaptive temperature based on confidence and entropy.
+
+    Args:
+        logits: Per-token logits in shape [batch, vocab].
+        alpha: Sensitivity to top-1/top-2 logit margin.
+        temperature: Global or per-item base temperature multiplier.
+        top_p: Global or per-item nucleus threshold.
+        t_min: Lower bound for dynamic temperature.
+        t_max: Upper bound for dynamic temperature.
+        healthy_entropy_limit: Entropy threshold after which exploration increases.
+
+    Returns:
+        Tuple of sampled token ids, entropy vector, and entropy overflow vector.
+    """
     probs = F.softmax(logits, dim=-1)
     entropy = -torch.sum(probs * torch.log(probs + 1e-9), dim=-1)
 
@@ -342,9 +356,9 @@ def thermodynamic_sampling_with_stats(
     t_base = t_min + (t_max - t_min) * torch.exp(-alpha * delta_top2)
 
     chaos_diff = torch.clamp(entropy - healthy_entropy_limit, min=0.0)
-    chaos_penalty = torch.exp(-chaos_diff)
+    chaos_boost = 1.0 - torch.exp(-chaos_diff)
 
-    t_dynamic = t_min + (t_base - t_min) * chaos_penalty
+    t_dynamic = t_base + (t_max - t_base) * chaos_boost
     t_dynamic = torch.clamp(t_dynamic, min=t_min, max=t_max).unsqueeze(-1)
 
     batch_size = logits.shape[0]

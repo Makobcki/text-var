@@ -77,3 +77,17 @@ def test_chat_completions_uses_chat_template_markers() -> None:
     assert "<|im_start|>system" in generated
     assert "<|im_start|>user" in generated
     assert "<|im_start|>assistant" in generated
+
+
+def test_chat_completions_rejects_stream_mode_until_true_streaming_exists() -> None:
+    """Ensure stream mode fails explicitly instead of emulating SSE with one full chunk."""
+    server._engine = DummyEngine()
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hello"}], "stream": True},
+    )
+
+    assert response.status_code == 501
+    assert "stream=True is not supported yet" in response.json()["detail"]

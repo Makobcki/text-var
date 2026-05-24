@@ -83,9 +83,11 @@ def test_triton_inputs_include_qjl_and_bits_fields() -> None:
         v_scales=torch.ones((1, 1, 1, 1), dtype=torch.float16),
         k_qjl_signs=signs,
         v_qjl_signs=signs,
-        bits=4,
+        key_bits=4,
+        value_bits=4,
     )
-    assert bundle.bits == 4
+    assert bundle.key_bits == 4
+    assert bundle.value_bits == 4
     assert bundle.k_qjl_signs is not None
 
 
@@ -99,7 +101,8 @@ def test_validate_inputs_rejects_bad_packed_width() -> None:
         v_quant=bad_packed,
         k_scales=torch.ones((1, 1, 2, 1), dtype=torch.float16),
         v_scales=torch.ones((1, 1, 2, 1), dtype=torch.float16),
-        bits=4,
+        key_bits=4,
+        value_bits=4,
     )
     with pytest.raises(TurboQuantKernelError):
         _validate_inputs_for_kernel(inputs=bundle, fallback_k=q, fallback_v=q)
@@ -114,7 +117,25 @@ def test_validate_inputs_rejects_unsupported_bits() -> None:
         v_quant=q.to(torch.uint8),
         k_scales=torch.ones((1, 1, 2, 1), dtype=torch.float16),
         v_scales=torch.ones((1, 1, 2, 1), dtype=torch.float16),
-        bits=3,
+        key_bits=3,
+        value_bits=3,
+    )
+    with pytest.raises(TurboQuantKernelError):
+        _validate_inputs_for_kernel(inputs=bundle, fallback_k=q, fallback_v=q)
+
+
+def test_validate_inputs_rejects_asymmetric_bits() -> None:
+    """Asymmetric K/V bit widths are rejected for fused Triton kernel path."""
+    q = torch.ones((1, 1, 2, 8), dtype=torch.float16)
+    packed_4bit = torch.ones((1, 1, 2, 4), dtype=torch.uint8)
+    bundle = TurboQuantTritonInputs(
+        q=q,
+        k_quant=packed_4bit,
+        v_quant=q.to(torch.uint8),
+        k_scales=torch.ones((1, 1, 2, 1), dtype=torch.float16),
+        v_scales=torch.ones((1, 1, 2, 1), dtype=torch.float16),
+        key_bits=4,
+        value_bits=8,
     )
     with pytest.raises(TurboQuantKernelError):
         _validate_inputs_for_kernel(inputs=bundle, fallback_k=q, fallback_v=q)

@@ -257,9 +257,14 @@ def _dequantize_kv(
     if inputs.k_scales.numel() == 0 or inputs.v_scales.numel() == 0:
         return fallback_k.contiguous(), fallback_v.contiguous()
     if inputs.key_bits not in _SUPPORTED_PACKED_BITS or inputs.value_bits not in _SUPPORTED_PACKED_BITS:
-        raise TurboQuantKernelError(f"Unsupported quantization bits: K={inputs.key_bits}, V={inputs.value_bits}.")
+        raise TurboQuantKernelError(
+            f"Unsupported quantization bits for Triton kernel: K={inputs.key_bits}, V={inputs.value_bits}. "
+            "Supported values are 4 or 8."
+        )
     if inputs.key_bits != inputs.value_bits:
-        raise TurboQuantKernelError("Triton TurboQuant kernel requires symmetric K/V bit widths.")
+        raise TurboQuantKernelError(
+            "Triton TurboQuant kernel requires symmetric K/V bit widths (K bits must equal V bits)."
+        )
     if inputs.key_bits == 4 and (inputs.k_quant.shape[-1] * 2) == fallback_k.shape[-1]:
         kq = _unpack_4bit_tensor(inputs.k_quant, fallback_k.shape[-1])
         vq = _unpack_4bit_tensor(inputs.v_quant, fallback_v.shape[-1])
@@ -322,7 +327,10 @@ def _validate_inputs_for_kernel(
         TurboQuantKernelError: If shapes/bitness are inconsistent.
     """
     if inputs.key_bits not in _SUPPORTED_PACKED_BITS or inputs.value_bits not in _SUPPORTED_PACKED_BITS:
-        raise TurboQuantKernelError(f"Unsupported quantization bits: K={inputs.key_bits}, V={inputs.value_bits}.")
+        raise TurboQuantKernelError(
+            f"Unsupported quantization bits for Triton kernel: K={inputs.key_bits}, V={inputs.value_bits}. "
+            "Supported values are 4 or 8."
+        )
     if inputs.key_bits != inputs.value_bits:
         raise TurboQuantKernelError("Triton TurboQuant kernel requires symmetric K/V bit widths.")
     if inputs.q.ndim != 4 or fallback_k.ndim != 4 or fallback_v.ndim != 4:
