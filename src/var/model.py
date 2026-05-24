@@ -29,6 +29,8 @@ class RingKVCacheView:
     positions: torch.Tensor
     codec: "TurboQuantCodec | None" = None
     layer_idx: int = -1
+    current_idx: int = 0
+    current_length: int = 0
 
 
 class RotaryEmbedding(nn.Module):
@@ -135,6 +137,39 @@ class SDPADecoderLayer(nn.Module):
             )
         return past_key_value
 
+    def _append_turboquant_step(
+        self,
+        past_key_value: RingKVCacheView,
+        step_k: torch.Tensor,
+        step_v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Append current step to preallocated quantized cache and return ordered payload."""
+        if past_key_value.codec is None:
+            raise ValueError("TurboQuant append requires codec.")
+        layer_idx = past_key_value.layer_idx
+        write_ptr = past_key_value.current_idx
+        qk, qv = past_key_value.codec.quantize_step(layer_idx, step_k, step_v, write_ptr)
+        past_key_value.keys[:, write_ptr : write_ptr + 1, :, :] = qk
+        past_key_value.values[:, write_ptr : write_ptr + 1, :, :] = qv
+        new_length = min(past_key_value.keys.shape[1], past_key_value.current_length + 1)
+        if new_length < past_key_value.keys.shape[1]:
+            ordered_positions = torch.arange(new_length, device=past_key_value.keys.device, dtype=torch.long)
+        else:
+            ordered_positions = (
+                torch.arange(past_key_value.keys.shape[1], device=past_key_value.keys.device, dtype=torch.long)
+                + ((write_ptr + 1) % past_key_value.keys.shape[1])
+            ) % past_key_value.keys.shape[1]
+        staged = RingKVCacheView(
+            keys=past_key_value.keys,
+            values=past_key_value.values,
+            positions=ordered_positions,
+            codec=past_key_value.codec,
+            layer_idx=layer_idx,
+            current_idx=(write_ptr + 1) % past_key_value.keys.shape[1],
+            current_length=new_length,
+        )
+        return past_key_value.codec.quantized_view_payload(staged)
+
     def forward(
         self,
         *,
@@ -169,17 +204,9 @@ class SDPADecoderLayer(nn.Module):
         can_use_turboquant = isinstance(past_key_value, RingKVCacheView) and past_key_value.codec is not None
         if bool(getattr(self, "use_turboquant", False)) and can_use_turboquant and self_attn_mask is None:
             assert past_key_value.codec is not None
-            pk, pv, ks, vs, ksign, vsign = past_key_value.codec.quantized_view_payload(past_key_value)
             step_k = k[:, -1:, :, :]
             step_v = v[:, -1:, :, :]
-            kq_cur, ksc_cur, _, ksg_cur = past_key_value.codec._quantize_tensor(step_k, bits=past_key_value.codec.cfg.key_bits)
-            vq_cur, vsc_cur, _, vsg_cur = past_key_value.codec._quantize_tensor(step_v, bits=past_key_value.codec.cfg.value_bits)
-            pk = torch.cat([pk, past_key_value.codec._pack_bits(kq_cur, past_key_value.codec.cfg.key_bits)], dim=1)
-            pv = torch.cat([pv, past_key_value.codec._pack_bits(vq_cur, past_key_value.codec.cfg.value_bits)], dim=1)
-            ks = torch.cat([ks, ksc_cur], dim=1)
-            vs = torch.cat([vs, vsc_cur], dim=1)
-            ksign = torch.cat([ksign, ksg_cur], dim=1)
-            vsign = torch.cat([vsign, vsg_cur], dim=1)
+            pk, pv, ks, vs, ksign, vsign = self._append_turboquant_step(past_key_value, step_k, step_v)
             qh = torch.einsum("blhd,df->blhf", q, self.R_k.to(q.device).transpose(0, 1)).transpose(1, 2)
             tq_inputs = TurboQuantTritonInputs(
                 q=qh,

@@ -100,6 +100,16 @@ class TurboQuantCodec:
             raise ValueError(f"Invalid layer_idx for RingKVCacheView: {view.layer_idx}")
         layer_idx = view.layer_idx
         positions = view.positions
+        if view.current_length > 0 and view.current_length < view.keys.shape[1]:
+            sl = slice(0, int(view.current_length))
+            return (
+                view.keys[:, sl, :, :],
+                view.values[:, sl, :, :],
+                self._key_scales[layer_idx][:, sl, :, :],
+                self._value_scales[layer_idx][:, sl, :, :],
+                self._key_residual_signs[layer_idx][:, sl, :, :],
+                self._value_residual_signs[layer_idx][:, sl, :, :],
+            )
         return (
             view.keys.index_select(1, positions),
             view.values.index_select(1, positions),
@@ -183,6 +193,8 @@ class KVCacheRingBuffer:
     def update(
         self,
         present_key_values: list[tuple[torch.Tensor, torch.Tensor]],
+        *,
+        skip_write: bool = False,
     ) -> list[RingKVCacheView]:
         """Append a single decoding step and expose ordered cache tensors.
 
@@ -194,9 +206,19 @@ class KVCacheRingBuffer:
         """
         if not self._keys:
             self._allocate(present_key_values)
+        if skip_write:
+            self._advance_all_layers()
+            return self.materialize()
         for layer_idx, (key, value) in enumerate(present_key_values):
             self._append_layer(layer_idx, key, value)
         return self.materialize()
+
+    def _advance_all_layers(self) -> None:
+        """Advance ring metadata when the model has already written the current step."""
+        for layer_idx in range(len(self._keys)):
+            write_ptr = self._write_ptrs[layer_idx]
+            self._write_ptrs[layer_idx] = (write_ptr + 1) % self.max_window
+            self._lengths[layer_idx] = min(self.max_window, self._lengths[layer_idx] + 1)
 
     def materialize(self) -> list[RingKVCacheView]:
         """Return static ring buffers and logical token positions.
@@ -209,15 +231,45 @@ class KVCacheRingBuffer:
             cur_len = self._lengths[layer_idx]
             if cur_len == 0:
                 positions = torch.empty((0,), dtype=torch.long, device=key_buffer.device)
-                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions, codec=self._codec, layer_idx=layer_idx))
+                ordered.append(
+                    RingKVCacheView(
+                        keys=key_buffer,
+                        values=self._values[layer_idx],
+                        positions=positions,
+                        codec=self._codec,
+                        layer_idx=layer_idx,
+                        current_idx=self._write_ptrs[layer_idx],
+                        current_length=cur_len,
+                    )
+                )
                 continue
             if cur_len < self.max_window:
                 positions = torch.arange(cur_len, device=key_buffer.device, dtype=torch.long)
-                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions, codec=self._codec, layer_idx=layer_idx))
+                ordered.append(
+                    RingKVCacheView(
+                        keys=key_buffer,
+                        values=self._values[layer_idx],
+                        positions=positions,
+                        codec=self._codec,
+                        layer_idx=layer_idx,
+                        current_idx=self._write_ptrs[layer_idx],
+                        current_length=cur_len,
+                    )
+                )
                 continue
             ptr = self._write_ptrs[layer_idx]
             positions = (torch.arange(self.max_window, device=key_buffer.device, dtype=torch.long) + ptr) % self.max_window
-            ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions, codec=self._codec, layer_idx=layer_idx))
+            ordered.append(
+                RingKVCacheView(
+                    keys=key_buffer,
+                    values=self._values[layer_idx],
+                    positions=positions,
+                    codec=self._codec,
+                    layer_idx=layer_idx,
+                    current_idx=self._write_ptrs[layer_idx],
+                    current_length=cur_len,
+                )
+            )
         return ordered
 
     def _allocate(self, present_key_values: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
@@ -386,7 +438,14 @@ def _decode_next_ar_token_with_cache(
         next_token,
         entropy,
         chaos,
-        cache_ring_buffer.update(present_key_values),
+        cache_ring_buffer.update(
+            present_key_values,
+            skip_write=bool(
+                past_key_values
+                and isinstance(past_key_values[0], RingKVCacheView)
+                and past_key_values[0].codec is not None
+            ),
+        ),
     )
 
 
