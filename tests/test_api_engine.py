@@ -22,7 +22,7 @@ class DummyPipeline:
         self.calls.append((prompts, max_new_tokens, temperature, top_p, turboquant_kv))
         temperatures = per_item_temperatures or [temperature] * len(prompts)
         top_ps = per_item_top_ps or [top_p] * len(prompts)
-        return [f"{prompt}|{max_new_tokens}|{temp}|{tp}" for prompt, temp, tp in zip(prompts, temperatures, top_ps)]
+        return [f"{prompt}|{temp}|{tp}" for prompt, temp, tp in zip(prompts, temperatures, top_ps)]
 
 
 def test_generate_batch_supports_mixed_sampling_settings() -> None:
@@ -38,8 +38,9 @@ def test_generate_batch_supports_mixed_sampling_settings() -> None:
         ]
     )
 
-    assert outputs == ["a|8|0.7|0.9", "b|16|0.9|0.95", "c|8|0.7|0.9"]
-    assert len(pipeline.calls) == 2
+    assert outputs == ["a|0.7|0.9", "b|0.9|0.95", "c|0.7|0.9"]
+    assert len(pipeline.calls) == 1
+    assert pipeline.calls[0][1] == 16
 
 
 def test_generate_batch_keeps_batching_for_mixed_temperatures() -> None:
@@ -53,8 +54,9 @@ def test_generate_batch_keeps_batching_for_mixed_temperatures() -> None:
             GenerationParams("c", 8, 1.4, 1.0),
         ]
     )
-    assert outputs == ["a|8|0.2|0.7", "b|8|0.9|0.95", "c|8|1.4|1.0"]
+    assert outputs == ["a|0.2|0.7", "b|0.9|0.95", "c|1.4|1.0"]
     assert len(pipeline.calls) == 1
+    assert pipeline.calls[0][1] == 8
 
 
 def test_generate_batch_splits_by_turboquant_flag() -> None:
