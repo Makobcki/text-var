@@ -115,6 +115,41 @@ def test_chat_completions_uses_chat_template_markers() -> None:
     assert "<|im_start|>assistant" in generated
 
 
+
+
+def test_completions_returns_nonzero_usage_counts() -> None:
+    """Ensure /v1/completions usage contains derived token counts."""
+    server._engine = DummyEngine()
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/completions",
+        json={"prompt": "alpha beta", "max_tokens": 2},
+    )
+
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_chat_completions_returns_nonzero_usage_counts() -> None:
+    """Ensure /v1/chat/completions usage contains derived token counts."""
+    server._engine = DummyEngine()
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hello world"}]},
+    )
+
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
 def test_chat_completions_rejects_stream_mode_until_true_streaming_exists() -> None:
     """Ensure stream mode fails explicitly instead of emulating SSE with one full chunk."""
     server._engine = DummyEngine()

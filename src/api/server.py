@@ -179,6 +179,51 @@ def _normalize_prompts(prompt: str | list[str]) -> list[str]:
     return normalized
 
 
+def _count_text_tokens(text: str) -> int:
+    """Count tokens for usage accounting.
+
+    Args:
+        text: Source text to tokenize.
+
+    Returns:
+        Estimated token count.
+    """
+    if not text:
+        return 0
+    if _pipeline is not None:
+        tokenizer = getattr(_pipeline, "_tokenizer", None)
+        if tokenizer is not None:
+            encoded = tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=False,
+                max_length=10**9,
+            )
+            token_ids = encoded.get("input_ids")
+            if token_ids is not None:
+                return int(token_ids.shape[-1])
+    return len(text.split())
+
+
+def _build_usage(prompts: list[str], completions: list[str]) -> dict[str, int]:
+    """Build OpenAI-like usage counters for prompt/completion tokens.
+
+    Args:
+        prompts: Request prompts in response order.
+        completions: Completion texts in response order.
+
+    Returns:
+        Usage payload with prompt/completion/total token counters.
+    """
+    prompt_tokens = sum(_count_text_tokens(prompt) for prompt in prompts)
+    completion_tokens = sum(_count_text_tokens(completion) for completion in completions)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
 class ChatChoice(BaseModel):
     index: int
     message: ChatMessage
@@ -267,7 +312,7 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
         choices=[
             ChatChoice(index=0, message=ChatMessage(role="assistant", content=generated_text))
         ],
-        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},  # Mocked usage
+        usage=_build_usage([prompt], [generated_text]),
     )
 
 
@@ -312,7 +357,7 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
             CompletionChoice(text=generated_text, index=index)
             for index, generated_text in enumerate(generated_texts)
         ],
-        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        usage=_build_usage(prompts, generated_texts),
     )
 
 
