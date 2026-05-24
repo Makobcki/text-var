@@ -7,6 +7,7 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import torch
+from safetensors.torch import save_file
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
@@ -113,9 +114,35 @@ def process_single_line(
 
     return {
         "id": str(index),
+        "index": int(index),
         "tokens": multiscale_tokens,
         "bytes_processed": len(line.encode("utf-8")),
     }
+
+
+def _save_chunk_as_safetensors(chunk_path: Path, batch_entries: list[dict[str, object]], level_count: int) -> None:
+    """Persist one chunk in safetensors format using contiguous tensors.
+
+    Args:
+        chunk_path: Destination safetensors path.
+        batch_entries: Tokenized entries for a single chunk.
+        level_count: Number of multiscale token levels.
+
+    Raises:
+        ValueError: If any entry has an invalid number of token levels.
+    """
+    tensor_payload: dict[str, torch.Tensor] = {
+        "ids": torch.tensor([int(item["index"]) for item in batch_entries], dtype=torch.int64),
+    }
+    for level_idx in range(level_count):
+        level_rows: list[torch.Tensor] = []
+        for item in batch_entries:
+            tokens = item["tokens"]
+            if not isinstance(tokens, list) or len(tokens) != level_count:
+                raise ValueError("Invalid token payload while creating safetensors chunk.")
+            level_rows.append(torch.as_tensor(tokens[level_idx], dtype=torch.int32))
+        tensor_payload[f"tokens_level_{level_idx}"] = torch.stack(level_rows, dim=0).contiguous()
+    save_file(tensor_payload, str(chunk_path))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -169,7 +196,7 @@ def main(argv: list[str] | None = None) -> None:
     with open(args.output_dir / "metadata.json", "w", encoding="utf-8") as fM:
         json.dump(metadata.to_dict(), fM, ensure_ascii=False, indent=2)
 
-    current_batch = []
+    current_batch: list[dict[str, object]] = []
     batch_index = 0
     total_saved_docs = 0
 
@@ -202,14 +229,19 @@ def main(argv: list[str] | None = None) -> None:
                 pbar.update(result["bytes_processed"])
 
                 if result["tokens"] is not None:
-                    tensor_tokens = [torch.tensor(t, dtype=torch.int32) for t in result["tokens"]]
-                    current_batch.append({"id": result["id"], "tokens": tensor_tokens})
+                    current_batch.append(
+                        {
+                            "id": result["id"],
+                            "index": result["index"],
+                            "tokens": result["tokens"],
+                        }
+                    )
                     total_saved_docs += 1
 
                 # Достигли лимита батча — сбрасываем на диск и полностью чистим память
                 if len(current_batch) >= args.batch_size:
-                    chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.pt"
-                    torch.save({"entries": current_batch}, chunk_path)
+                    chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
+                    _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
 
                     # Явное освобождение памяти
                     current_batch = []
@@ -217,8 +249,8 @@ def main(argv: list[str] | None = None) -> None:
 
             # Сбрасываем остатки данных
             if current_batch:
-                chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.pt"
-                torch.save({"entries": current_batch}, chunk_path)
+                chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
+                _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
                 del current_batch
 
             pbar.close()
