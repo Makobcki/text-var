@@ -20,3 +20,18 @@ def test_resolve_padding_mask_merges_provided_and_inferred_masks() -> None:
     mask = model._resolve_padding_mask(tokens, padding_mask=provided)
 
     assert torch.equal(mask, torch.tensor([[True, False, True, False]]))
+
+
+def test_encode_sentence_preserves_semantic_sequence_length() -> None:
+    model = SemanticTextVQVAE(
+        vocab_size=32,
+        hidden_size=8,
+        num_semantic_tokens=16,
+        semantic_sequence_length=4,
+        pad_token_id=0,
+    )
+    tokens = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=torch.long)
+
+    semantic_idx, _ = model.encode_sentence(tokens, padding_mask=tokens.eq(0))
+
+    assert semantic_idx.shape == (1, 4)
