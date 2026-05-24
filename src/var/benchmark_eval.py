@@ -63,6 +63,26 @@ def configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=level, format=fmt)
 
 
+def _get_required_field(record: dict[str, object], field_names: Sequence[str], line_number: int) -> str:
+    """Get a required string field from a dataset record.
+
+    Args:
+        record: Parsed JSON object for one dataset line.
+        field_names: Ordered candidate keys to resolve.
+        line_number: One-based source line number for error context.
+
+    Returns:
+        Resolved field as string.
+
+    Raises:
+        ValueError: If none of the candidate keys are present.
+    """
+    for field_name in field_names:
+        if field_name in record:
+            return str(record[field_name])
+    raise ValueError(f"Missing required field(s) {field_names} at dataset line {line_number}")
+
+
 def load_jsonl_problems(dataset_path: Path) -> list[BenchmarkProblem]:
     """Load HumanEval/MBPP-style tasks from JSONL.
 
@@ -71,17 +91,20 @@ def load_jsonl_problems(dataset_path: Path) -> list[BenchmarkProblem]:
 
     Returns:
         Parsed benchmark problems.
+
+    Raises:
+        ValueError: If a record misses required schema fields.
     """
     problems: list[BenchmarkProblem] = []
     with dataset_path.open("r", encoding="utf-8") as file:
-        for line in file:
+        for line_number, line in enumerate(file, start=1):
             raw = json.loads(line)
             problems.append(
                 BenchmarkProblem(
-                    task_id=str(raw["task_id"]),
-                    prompt=str(raw["prompt"]),
-                    test_code=str(raw["test"]),
-                    entry_point=str(raw["entry_point"]),
+                    task_id=_get_required_field(raw, ["task_id", "id", "problem_id"], line_number),
+                    prompt=_get_required_field(raw, ["prompt", "text"], line_number),
+                    test_code=_get_required_field(raw, ["test", "test_code"], line_number),
+                    entry_point=_get_required_field(raw, ["entry_point", "function_name"], line_number),
                 )
             )
     return problems
