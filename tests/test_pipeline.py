@@ -102,6 +102,29 @@ def test_missing_tokenizer_file_raises(tmp_path: Path) -> None:
         raise AssertionError("Expected FileNotFoundError")
 
 
+def test_load_tokenizer_sets_pad_to_eos_when_missing(monkeypatch, tmp_path: Path) -> None:
+    tokenizer_file = tmp_path / "tokenizer.json"
+    tokenizer_file.write_text("x", encoding="utf-8")
+
+    class _TokenizerWithoutPad:
+        def __init__(self) -> None:
+            self.pad_token_id = None
+            self.eos_token = "</s>"
+            self.pad_token: str | None = None
+
+        def add_special_tokens(self, tokens: dict[str, str]) -> None:
+            del tokens
+            raise AssertionError("add_special_tokens should not be called when eos_token exists")
+
+    tokenizer = _TokenizerWithoutPad()
+    monkeypatch.setattr("src.core.pipeline.PreTrainedTokenizerFast", lambda tokenizer_file: tokenizer)
+
+    loaded = TextVARPipeline._load_tokenizer(tokenizer_file)
+
+    assert loaded is tokenizer
+    assert tokenizer.pad_token == tokenizer.eos_token
+
+
 def test_load_var_uses_model_config(monkeypatch, tmp_path: Path) -> None:
     cfg = PipelineConfig(
         vqvae_path=tmp_path / "vqvae.pt",
