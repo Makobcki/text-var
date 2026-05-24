@@ -65,6 +65,30 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
     assert output[2].shape[1] == 8
 
 
+def test_phase2_finished_rows_are_padded(monkeypatch) -> None:
+    model = _ToyModel(eos_token_id=2)
+    model.cfg.pad_token_id = 0
+    sampled_tokens = [torch.tensor([2, 5]), torch.tensor([7, 6])]
+
+    def _fake_decode_with_cache(**kwargs):
+        del kwargs
+        token = sampled_tokens.pop(0)
+        return token, torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32), []
+
+    def _fake_decode_no_cache(**kwargs):
+        del kwargs
+        return torch.tensor([1, 1]), torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32)
+
+    monkeypatch.setattr("src.var.generator._decode_next_ar_token", _fake_decode_no_cache)
+    monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)
+    monkeypatch.setattr("src.var.generator._parallel_block_draft", lambda **kwargs: torch.zeros((2, kwargs["len_lvl_2"]), dtype=torch.long))
+    monkeypatch.setattr("src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"])
+
+    output = hybrid_cascade_decode(model, batch_size=2, device=torch.device("cpu"))
+    lvl1 = output[1]
+    assert int(lvl1[0, 1].item()) == int(model.cfg.pad_token_id)
+
+
 def test_encode_multiscale_appends_eos() -> None:
     from src.data.utils.prepare_dataset import _encode_multiscale
 

@@ -29,6 +29,7 @@ def _load_vqvae_checkpoint(
     vocab_size: int,
     hidden_size: int,
     semantic_tokens: int,
+    semantic_sequence_length: int,
     device: torch.device,
 ) -> SemanticTextVQVAE:
     """Load trained VQ-VAE model from checkpoint.
@@ -55,6 +56,7 @@ def _load_vqvae_checkpoint(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
         num_semantic_tokens=semantic_tokens,
+        semantic_sequence_length=semantic_sequence_length,
     ).to(device)
     model.load_state_dict(model_state)
     model.eval()
@@ -102,6 +104,7 @@ def rewrite_cache_with_vqvae(
         vocab_size=int(metadata.level_vocab_sizes[level_from]),
         hidden_size=hidden_size,
         semantic_tokens=semantic_tokens,
+        semantic_sequence_length=int(metadata.level_lengths[level_to]),
         device=dev,
     )
 
@@ -129,8 +132,6 @@ def rewrite_cache_with_vqvae(
 
                 semantic_ids = semantic_idx.view(-1).to(dtype=torch.long, device="cpu")
                 expected_len = int(metadata.level_lengths[level_to])
-                if semantic_ids.numel() == 1 and expected_len > 1:
-                    semantic_ids = semantic_ids.repeat(expected_len)
                 if semantic_ids.numel() != expected_len:
                     raise ValueError(
                         f"Produced semantic token length ({semantic_ids.numel()}) does not match "

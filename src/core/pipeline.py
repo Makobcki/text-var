@@ -66,6 +66,7 @@ class TextVARPipeline:
         max_new_tokens: int = 50,
         temperature: float = 1.0,
         top_p: float = 1.0,
+        turboquant_kv: bool = False,
     ) -> str:
         """Generate text continuation from a prompt.
 
@@ -84,6 +85,7 @@ class TextVARPipeline:
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
+            turboquant_kv=turboquant_kv,
         )
         return generated_texts[0]
 
@@ -96,6 +98,7 @@ class TextVARPipeline:
         top_p: float = 1.0,
         per_item_temperatures: list[float] | None = None,
         per_item_top_ps: list[float] | None = None,
+        turboquant_kv: bool = False,
     ) -> list[str]:
         """Generate text continuations for a batch of prompts.
 
@@ -149,6 +152,7 @@ class TextVARPipeline:
             prefix_inputs=[semantic_prefix],
             temperature=sampling_temperatures,
             top_p=sampling_top_ps,
+            turboquant_kv=turboquant_kv,
         )
 
         decoded_bpe = self._vqvae.decode_from_semantic_indices(

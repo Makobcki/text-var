@@ -1,6 +1,6 @@
 import torch
 
-from src.var.generator import KVCacheRingBuffer
+from src.var.generator import KVCacheRingBuffer, TurboQuantConfig
 from src.var.model import RingKVCacheView
 
 
@@ -45,3 +45,31 @@ def test_kv_ring_buffer_exposes_wrapped_positions_without_reallocation() -> None
         cached = ring.update(present)
     layer_view = cached[0]
     assert layer_view.positions.tolist() == [1, 2, 0]
+
+
+def test_kv_ring_buffer_turboquant_compresses_to_uint8_and_materializes() -> None:
+    ring = KVCacheRingBuffer(max_window=3, turboquant_config=TurboQuantConfig())
+    for step in [1, 2, 3]:
+        present = [(_make_layer_tensor([step]), _make_layer_tensor([step + 100]))]
+        cached = ring.update(present)
+    layer_view = cached[0]
+    assert layer_view.keys.dtype == torch.uint8
+    assert layer_view.values.dtype == torch.uint8
+    assert layer_view.codec is not None
+    assert layer_view.layer_idx == 0
+
+    key, value = layer_view.codec.dequantize_view(layer_view)
+    assert tuple(key.shape) == (1, 3, 1, 1)
+    assert tuple(value.shape) == (1, 3, 1, 1)
+
+
+def test_turboquant_stores_bitpacked_width() -> None:
+    ring = KVCacheRingBuffer(max_window=2, turboquant_config=TurboQuantConfig(key_bits=3, value_bits=4))
+    present = [(
+        torch.ones((1, 1, 1, 8), dtype=torch.float32),
+        torch.ones((1, 1, 1, 8), dtype=torch.float32),
+    )]
+    cached = ring.update(present)
+    layer_view = cached[0]
+    assert layer_view.keys.shape[-1] == 3
+    assert layer_view.values.shape[-1] == 4

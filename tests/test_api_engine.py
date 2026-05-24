@@ -7,7 +7,7 @@ class DummyPipeline:
     """Pipeline stub returning deterministic batched outputs."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], int, float, float]] = []
+        self.calls: list[tuple[list[str], int, float, float, bool]] = []
 
     def generate_batch(
         self,
@@ -17,8 +17,9 @@ class DummyPipeline:
         top_p: float = 1.0,
         per_item_temperatures: list[float] | None = None,
         per_item_top_ps: list[float] | None = None,
+        turboquant_kv: bool = False,
     ) -> list[str]:
-        self.calls.append((prompts, max_new_tokens, temperature, top_p))
+        self.calls.append((prompts, max_new_tokens, temperature, top_p, turboquant_kv))
         temperatures = per_item_temperatures or [temperature] * len(prompts)
         top_ps = per_item_top_ps or [top_p] * len(prompts)
         return [f"{prompt}|{max_new_tokens}|{temp}|{tp}" for prompt, temp, tp in zip(prompts, temperatures, top_ps)]
@@ -54,3 +55,16 @@ def test_generate_batch_keeps_batching_for_mixed_temperatures() -> None:
     )
     assert outputs == ["a|8|0.2|0.7", "b|8|0.9|0.95", "c|8|1.4|1.0"]
     assert len(pipeline.calls) == 1
+
+
+def test_generate_batch_splits_by_turboquant_flag() -> None:
+    """Ensure batching key separates turboquant-enabled and disabled requests."""
+    pipeline = DummyPipeline()
+    engine = TextVAREngine(pipeline)  # type: ignore[arg-type]
+    _ = engine.generate_batch(
+        [
+            GenerationParams("a", 8, 0.7, 0.9, turboquant_kv=True),
+            GenerationParams("b", 8, 0.7, 0.9, turboquant_kv=False),
+        ]
+    )
+    assert len(pipeline.calls) == 2

@@ -133,6 +133,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = 1.0
     top_p: float = 1.0
     stream: bool = False
+    turboquant_kv: bool = False
 
 
 class CompletionRequest(BaseModel):
@@ -142,6 +143,7 @@ class CompletionRequest(BaseModel):
     temperature: float = 1.0
     top_p: float = 1.0
     stream: bool = False
+    turboquant_kv: bool = False
 
 
 def _build_chat_prompt(messages: list[ChatMessage]) -> str:
@@ -244,6 +246,7 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
         max_tokens=request.max_tokens,
         temperature=request.temperature,
         top_p=request.top_p,
+        turboquant_kv=request.turboquant_kv,
     )
     try:
         generated_text = await run_in_threadpool(_engine.generate, params)
