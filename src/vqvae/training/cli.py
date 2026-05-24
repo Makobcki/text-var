@@ -23,4 +23,5 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--semantic-tokens", type=int, default=4096)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--level-index", type=int, default=2)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     return parser

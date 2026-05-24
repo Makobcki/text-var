@@ -36,7 +36,11 @@ def run_training(
     lr: float = 3e-4,
     device: str = "cuda",
     level_index: int = 2,
+    gradient_accumulation_steps: int = 1,
 ) -> Path:
+    if gradient_accumulation_steps <= 0:
+        raise ValueError("gradient_accumulation_steps must be greater than 0.")
+
     chunk_paths, metadata = load_token_entries_from_directory(token_cache_dir)
     if not (0 <= int(level_index) < len(metadata.level_lengths)):
         raise ValueError(f"level-index must be in [0, {len(metadata.level_lengths) - 1}]")
@@ -59,24 +63,41 @@ def run_training(
 
     model.train()
     step = 0
+    micro_step = 0
+    optimizer.zero_grad(set_to_none=True)
     while step < steps:
         did_progress = False
         for tokens, padding_mask in loader:
             did_progress = True
             tokens = tokens.to(dev, non_blocking=True)
             padding_mask = padding_mask.to(dev, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
             _, loss = model(tokens, padding_mask=padding_mask)
-            loss.backward()
-            optimizer.step()
-            step += 1
-            if step % 20 == 0:
-                print(f"[VQVAE] step={step}/{steps} loss={float(loss.detach().cpu()):.6f}")
+            scaled_loss = loss / gradient_accumulation_steps
+            scaled_loss.backward()
+            micro_step += 1
+            if micro_step % gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                step += 1
+                if step % 20 == 0:
+                    print(f"[VQVAE] step={step}/{steps} loss={float(loss.detach().cpu()):.6f}")
             if step >= steps:
                 break
 
         if not did_progress:
             raise RuntimeError("No valid token entries were loaded from token cache.")
+
+        if step >= steps:
+            break
+
+        if micro_step % gradient_accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            step += 1
+            if step % 20 == 0:
+                print(f"[VQVAE] step={step}/{steps} loss={float(loss.detach().cpu()):.6f}")
+            if step >= steps:
+                break
 
     save_vqvae_checkpoint({
             "model": model.state_dict(),
@@ -117,6 +138,7 @@ def main() -> None:
         semantic_tokens=args.semantic_tokens,
         lr=args.lr,
         level_index=args.level_index,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
     run_training(
         cfg.output,
@@ -129,6 +151,7 @@ def main() -> None:
         lr=cfg.lr,
         device=cfg.device,
         level_index=cfg.level_index,
+        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
     )
 
 
