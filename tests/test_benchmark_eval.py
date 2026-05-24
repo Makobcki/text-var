@@ -53,7 +53,21 @@ def test_load_jsonl_problems_supports_mbpp_alias_fields(tmp_path: Path) -> None:
 
 def test_load_jsonl_problems_missing_required_field_raises_value_error(tmp_path: Path) -> None:
     dataset = tmp_path / "broken.jsonl"
-    dataset.write_text('{"prompt": "def f():", "test": "assert f()==1", "entry_point": "f"}\n', encoding="utf-8")
+    dataset.write_text('{"prompt": "def f():", "entry_point": "f"}\n', encoding="utf-8")
 
-    with pytest.raises(ValueError, match="Missing required field"):
+    with pytest.raises(ValueError, match="Missing required test field"):
         load_jsonl_problems(dataset)
+
+
+def test_load_jsonl_problems_infers_entry_point_and_task_id(tmp_path: Path) -> None:
+    dataset = tmp_path / "mbpp_no_entry.jsonl"
+    dataset.write_text(
+        '{"prompt": "def solve(x):", "test_list": ["assert solve(2)==2"]}\n',
+        encoding="utf-8",
+    )
+
+    problems = load_jsonl_problems(dataset)
+
+    assert problems[0].task_id == "line_1"
+    assert problems[0].entry_point == "solve"
+    assert problems[0].test_code == "assert solve(2)==2"
