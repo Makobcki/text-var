@@ -64,7 +64,11 @@ def save_checkpoint(
 
 
 def load_checkpoint(path: str | Path, *, device: torch.device) -> tuple[VARTransformer, dict[str, Any]]:
-    payload = torch.load(Path(path), map_location=device)
+    checkpoint_path = Path(path)
+    try:
+        payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        payload = torch.load(checkpoint_path, map_location=device)
     if not isinstance(payload, dict):
         raise ValueError("Checkpoint payload must be a dictionary.")
     if payload.get("model_family") != "var":

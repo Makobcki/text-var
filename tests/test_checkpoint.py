@@ -61,3 +61,43 @@ def test_restore_training_state_loads_scaler_and_optimizer() -> None:
         "rng_state": {"torch": torch.random.get_rng_state(), "python": random.getstate()},
     }
     restore_training_state(payload, optimizer=optimizer, scaler=scaler, scheduler=None)
+
+
+def test_load_checkpoint_uses_weights_only_false(monkeypatch, tmp_path: Path) -> None:
+    from src.var.checkpoint import load_checkpoint
+
+    captured: dict[str, object] = {}
+
+    cfg = VARConfig(
+        level_vocab_sizes=(16, 16),
+        level_lengths=(2, 2),
+        hidden_size=8,
+        depth=1,
+        num_heads=2,
+        mlp_ratio=1.0,
+        exit_layers=(),
+    )
+    model = VARTransformer(cfg)
+    checkpoint_path = tmp_path / "load-model.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model=model,
+        optimizer=None,
+        step=1,
+        loss=0.0,
+        scaler=None,
+        scheduler=None,
+    )
+
+    original_load = torch.load
+
+    def _spy_load(*args, **kwargs):
+        captured.update(kwargs)
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", _spy_load)
+    loaded_model, payload = load_checkpoint(checkpoint_path, device=torch.device("cpu"))
+
+    assert isinstance(loaded_model, VARTransformer)
+    assert isinstance(payload, dict)
+    assert captured.get("weights_only") is False
