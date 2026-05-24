@@ -38,7 +38,8 @@ class _DummyVQVAE(torch.nn.Module):
     def encode_sentence(self, bpe_tokens: torch.Tensor, padding_mask: torch.Tensor | None = None):
         del padding_mask
         batch = bpe_tokens.shape[0]
-        return torch.zeros((batch, 1), dtype=torch.long), torch.tensor(0.0)
+        semantic_indices = torch.arange(1, batch + 1, dtype=torch.long).unsqueeze(1)
+        return semantic_indices, torch.tensor(0.0)
 
     def decode_from_semantic_indices(
         self,
@@ -47,8 +48,10 @@ class _DummyVQVAE(torch.nn.Module):
         max_length: int,
         bos_token_id: int,
         eos_token_id: int | None = None,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
     ):
-        del semantic_indices, eos_token_id
+        del semantic_indices, eos_token_id, temperature, top_p
         return torch.full((1, max_length), bos_token_id, dtype=torch.long)
 
 
@@ -86,6 +89,7 @@ def test_generate_flow(monkeypatch, tmp_path: Path) -> None:
 
     assert result == "1|1|1|1"
     assert tuple(capture["prefix"].shape) == (1, 1)
+    assert int(capture["prefix"][0, 0]) == 1
 
 
 def test_missing_tokenizer_file_raises(tmp_path: Path) -> None:
@@ -172,6 +176,34 @@ def test_vqvae_decode_rejects_invalid_max_length() -> None:
         assert "max_length must be >= 1" in str(exc)
     else:
         raise AssertionError("Expected ValueError for max_length=0")
+
+
+def test_vqvae_decode_rejects_invalid_sampling_params() -> None:
+    model = SemanticTextVQVAE(vocab_size=16, hidden_size=8, num_semantic_tokens=8).eval()
+
+    try:
+        model.decode_from_semantic_indices(
+            torch.tensor([[1]], dtype=torch.long),
+            max_length=2,
+            bos_token_id=1,
+            temperature=0.0,
+        )
+    except ValueError as exc:
+        assert "temperature must be > 0" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for non-positive temperature")
+
+    try:
+        model.decode_from_semantic_indices(
+            torch.tensor([[1]], dtype=torch.long),
+            max_length=2,
+            bos_token_id=1,
+            top_p=0.0,
+        )
+    except ValueError as exc:
+        assert "top_p must be in (0, 1]" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for invalid top_p")
 
 
 def test_parallel_block_draft_raises_rollback_on_high_chaos(monkeypatch) -> None:
