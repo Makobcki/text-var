@@ -1,9 +1,7 @@
 """Tests for TurboQuant Triton wrapper fallback behavior."""
 
 import pytest
-
-torch = pytest.importorskip("torch")
-
+import torch
 from src.var.turboquant_triton import (
     TurboQuantKernelError,
     TurboQuantTritonInputs,

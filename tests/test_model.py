@@ -25,8 +25,8 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         self.masks.append(self_attn_mask)
         self.causal_flags.append(self_is_causal)
         if past_key_value is None:
-            b, l, _ = tgt.shape
-            empty = torch.empty((b, l, self.num_heads, self.head_dim), dtype=tgt.dtype, device=tgt.device)
+            batch_size, seq_len, _ = tgt.shape
+            empty = torch.empty((batch_size, seq_len, self.num_heads, self.head_dim), dtype=tgt.dtype, device=tgt.device)
             return tgt, (empty, empty)
         return tgt, past_key_value
 

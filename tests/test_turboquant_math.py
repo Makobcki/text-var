@@ -1,10 +1,10 @@
 """Tests for TurboQuant math helpers."""
 
 import pytest
+from src.var.turboquant_math import generate_orthogonal_matrix, turboquant_compress, turboquant_decompress
+
 
 torch = pytest.importorskip("torch")
-
-from src.var.turboquant_math import generate_orthogonal_matrix, turboquant_compress, turboquant_decompress
 
 
 def test_generate_orthogonal_matrix_shape() -> None:

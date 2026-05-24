@@ -1,13 +1,12 @@
 """OpenAI-compatible API server for TextVAR model."""
 #!/usr/bin/env python
 
-import argparse
 import asyncio
 import logging
+import uuid
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Any, Literal
+from typing import AsyncGenerator, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException

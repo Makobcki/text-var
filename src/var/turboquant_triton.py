@@ -80,7 +80,7 @@ if triton is not None:
         V_SCALES,
         K_QJL,
         V_QJL,
-        O,
+        out_tensor,
         stride_qz,
         stride_qh,
         stride_qm,
@@ -193,7 +193,7 @@ if triton is not None:
             m_i = m_ij
         l_i = tl.where(l_i > 0.0, l_i, 1.0)
         acc = acc / l_i[:, None]
-        o_ptr = O + b * stride_oz + h * stride_oh + off_m[:, None] * stride_om + off_d[None, :] * stride_od
+        o_ptr = out_tensor + b * stride_oz + h * stride_oh + off_m[:, None] * stride_om + off_d[None, :] * stride_od
         tl.store(o_ptr, acc.to(tl.float16), mask=off_m[:, None] < seqlen_q)
 
 
