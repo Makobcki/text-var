@@ -547,26 +547,30 @@ def _inpaint_block_seams(
     seams_per_pass = max(1, int(max_seams_per_pass))
     for seam_offset in range(0, len(seam_spans), seams_per_pass):
         seam_chunk = seam_spans[seam_offset : seam_offset + seams_per_pass]
-        expanded = stitched.repeat_interleave(len(seam_chunk), dim=0)
-        mask_positions: list[tuple[int, int]] = []
-        row = 0
-        for b in range(batch_size):
-            for left, right in seam_chunk:
-                expanded[row, left:right] = model.cfg.mask_token_id
-                for pos in range(left, right):
-                    mask_positions.append((row, pos))
-                row += 1
+        seam_count = len(seam_chunk)
+        expanded = stitched.repeat_interleave(seam_count, dim=0)
+        seam_bounds = torch.tensor(seam_chunk, device=lvl_2_tokens.device, dtype=torch.long)
+        seam_left = seam_bounds[:, 0]
+        seam_right = seam_bounds[:, 1]
+
+        row_ids = torch.arange(expanded.shape[0], device=lvl_2_tokens.device, dtype=torch.long)
+        seam_ids = row_ids.remainder(seam_count)
+        left_per_row = seam_left.index_select(0, seam_ids)
+        right_per_row = seam_right.index_select(0, seam_ids)
+
+        token_positions = torch.arange(seq_len, device=lvl_2_tokens.device, dtype=torch.long).unsqueeze(0)
+        seam_mask = (token_positions >= left_per_row.unsqueeze(1)) & (token_positions < right_per_row.unsqueeze(1))
+        pos_rows, pos_cols = torch.where(seam_mask)
+        expanded[seam_mask] = model.cfg.mask_token_id
 
         logits = model(
-            prefix_inputs=[x.repeat_interleave(len(seam_chunk), dim=0) for x in prefix_inputs],
+            prefix_inputs=[x.repeat_interleave(seam_count, dim=0) for x in prefix_inputs],
             target_level=2,
             current_level_input=expanded,
             cfg_scale=cfg_scale,
             compact_memory_for_final_level=True,
         )
 
-        pos_rows = torch.tensor([r for r, _ in mask_positions], device=lvl_2_tokens.device)
-        pos_cols = torch.tensor([c for _, c in mask_positions], device=lvl_2_tokens.device)
         masked_logits = logits[pos_rows, pos_cols, :]
         sampled, _, _ = thermodynamic_sampling_with_stats(
             masked_logits,
@@ -577,11 +581,11 @@ def _inpaint_block_seams(
         )
         expanded[pos_rows, pos_cols] = sampled
 
-        row = 0
-        for b in range(batch_size):
-            for left, right in seam_chunk:
-                stitched[b, left:right] = expanded[row, left:right]
-                row += 1
+        expanded_by_seam = expanded.view(batch_size, seam_count, seq_len)
+        for seam_idx in range(seam_count):
+            left = int(seam_left[seam_idx].item())
+            right = int(seam_right[seam_idx].item())
+            stitched[:, left:right] = expanded_by_seam[:, seam_idx, left:right]
     return stitched
 
 
