@@ -54,3 +54,47 @@ def test_validation_sample_contains_prompt() -> None:
     text = _generate_validation_sample(5, "hello", 32)
     assert "hello" in text
     assert "step=5" in text
+
+
+def test_config_uses_token_metadata_vocab_when_model_vocab_missing(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "train.json"
+    payload = {
+        "checkpoint_path": "checkpoints/latest.pt",
+        "token_metadata": {
+            "kind": "vq",
+            "level_vocab_sizes": [4096, 4096, 50257],
+            "level_lengths": [64, 128, 512],
+            "codebook_dim": 256,
+            "max_token_length": 704,
+        },
+    }
+    cfg_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    cfg = load_train_config(cfg_path)
+
+    assert tuple(cfg.model.level_vocab_sizes) == (4096, 4096, 50257)
+    assert tuple(cfg.model.level_lengths) == (64, 128, 512)
+
+
+def test_config_respects_explicit_model_vocab_over_token_metadata(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "train.json"
+    payload = {
+        "checkpoint_path": "checkpoints/latest.pt",
+        "model": {
+            "level_vocab_sizes": [100, 200],
+            "level_lengths": [4, 8],
+        },
+        "token_metadata": {
+            "kind": "vq",
+            "level_vocab_sizes": [4096, 4096, 50257],
+            "level_lengths": [64, 128, 512],
+            "codebook_dim": 256,
+            "max_token_length": 704,
+        },
+    }
+    cfg_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    cfg = load_train_config(cfg_path)
+
+    assert tuple(cfg.model.level_vocab_sizes) == (100, 200)
+    assert tuple(cfg.model.level_lengths) == (4, 8)

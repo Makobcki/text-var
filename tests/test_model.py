@@ -155,3 +155,27 @@ def test_local_sliding_window_mask_uses_banded_causal_pattern() -> None:
     expected[3, 2:4] = 0.0
     expected[4, 3:5] = 0.0
     assert torch.equal(mask, expected)
+
+
+def test_model_raises_clear_error_for_out_of_range_prefix_tokens() -> None:
+    cfg = VARConfig(
+        level_vocab_sizes=(8, 16),
+        level_lengths=(3, 3),
+        hidden_size=8,
+        depth=1,
+        num_heads=2,
+        mlp_ratio=1.0,
+        exit_layers=(),
+    )
+    model = VARTransformer(cfg).eval()
+    bad_prefix_tokens = [torch.tensor([[0, 1, 8]], dtype=torch.long)]
+    current_tokens = torch.tensor([[1, 2, 3]], dtype=torch.long)
+
+    try:
+        _ = model(bad_prefix_tokens, target_level=1, current_level_input=current_tokens)
+    except ValueError as exc:
+        assert "prefix_inputs[0]" in str(exc)
+        assert "level 0" in str(exc)
+        return
+
+    raise AssertionError("Expected ValueError for out-of-range prefix token ids.")

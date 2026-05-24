@@ -84,7 +84,7 @@ def load_train_config(path: Path) -> TrainConfig:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    model_cfg = VARConfig.from_dict(data.get("model", {}))
+    model_cfg_payload = dict(data.get("model", {}))
 
     # Ленивый импорт для предотвращения циклической зависимости при сборке метаданных
     token_metadata = None
@@ -92,6 +92,12 @@ def load_train_config(path: Path) -> TrainConfig:
         from src.data.token_cache import TokenCacheMetadata
 
         token_metadata = TokenCacheMetadata.from_dict(data["token_metadata"])
+        if "level_vocab_sizes" not in model_cfg_payload:
+            model_cfg_payload["level_vocab_sizes"] = list(token_metadata.level_vocab_sizes)
+        if "level_lengths" not in model_cfg_payload:
+            model_cfg_payload["level_lengths"] = list(token_metadata.level_lengths)
+
+    model_cfg = VARConfig.from_dict(model_cfg_payload)
 
     return TrainConfig(
         model=model_cfg,
