@@ -363,41 +363,29 @@ class VARTransformer(nn.Module):
         deq = codec._dequantize_tensor(unpacked, scale, zero, signs)
         return deq.view_as(x).to(dtype=x.dtype)
 
-    def _build_local_causal_mask(self, seq_len: int, radius: int, device: torch.device) -> torch.Tensor:
-        """Create additive local causal mask for vectorized prefix attention."""
-        effective_radius = max(1, radius)
-        allow = torch.ones((seq_len, seq_len), dtype=torch.bool, device=device)
-        allow = torch.tril(allow, diagonal=0)
-        allow = torch.triu(allow, diagonal=-(effective_radius - 1))
-        mask = torch.full((seq_len, seq_len), float("-inf"), device=device)
-        return mask.masked_fill(allow, 0.0)
-
-    def _run_prefix_block_with_sliding_window(
+    def _run_prefix_block_causal(
         self,
         block: SDPADecoderLayer,
         x_scale: torch.Tensor,
         current_context: torch.Tensor,
         rotary_freqs_tgt: torch.Tensor,
-        radius: int,
     ) -> torch.Tensor:
-        """Run one prefix block with causal sliding-window attention.
+        """Run one prefix block with standard causal attention.
 
         Args:
             block: Decoder block to execute.
             x_scale: Prefix embeddings for one scale.
             current_context: Cross-attention memory.
             rotary_freqs_tgt: Rotary frequencies for prefix sequence.
-            radius: Sliding-window radius in tokens.
 
         Returns:
             Updated prefix features.
         """
-        mask = self._build_local_causal_mask(x_scale.shape[1], radius, x_scale.device)
         out, _ = block(
             tgt=x_scale,
             memory=current_context,
-            self_attn_mask=mask,
-            self_is_causal=False,
+            self_attn_mask=None,
+            self_is_causal=True,
             rotary_freqs_tgt=rotary_freqs_tgt,
             past_key_value=None,
         )
@@ -455,12 +443,13 @@ class VARTransformer(nn.Module):
             local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
             for block in self.blocks:
                 if local_radius > 0 and seq_len > 1:
-                    x_scale = self._run_prefix_block_with_sliding_window(
+                    # Keep config option for compatibility, but avoid dense custom masks
+                    # that disable FlashAttention kernels in SDPA.
+                    x_scale = self._run_prefix_block_causal(
                         block=block,
                         x_scale=x_scale,
                         current_context=current_context,
                         rotary_freqs_tgt=rotary_freqs_tgt,
-                        radius=local_radius,
                     )
                 elif use_ckpt:
                     x_scale, _ = checkpoint(
