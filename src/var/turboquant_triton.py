@@ -387,8 +387,10 @@ def _launch_turboquant_kernel(
     if head_dim not in _SUPPORTED_HEAD_DIMS:
         return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
     out = torch.empty_like(q)
-    block_m = 16 if seqlen_q <= 1 else 64
+    decoding_mode = seqlen_q == 1
+    block_m = 1 if decoding_mode else 64
     block_n = 64
+    num_warps = 4 if decoding_mode else 8
     grid = (triton.cdiv(seqlen_q, block_m), bsz * heads)
     k_scales = _reshape_scales(raw_inputs.k_scales, raw_inputs.k_quant) if raw_inputs.k_scales.numel() > 0 else torch.ones((*k.shape[:-1], 1), device=k.device, dtype=k.dtype)
     v_scales = _reshape_scales(raw_inputs.v_scales, raw_inputs.v_quant) if raw_inputs.v_scales.numel() > 0 else torch.ones((*v.shape[:-1], 1), device=v.device, dtype=v.dtype)
@@ -446,6 +448,7 @@ def _launch_turboquant_kernel(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_D=head_dim,
+        num_warps=num_warps,
     )
     return out
 
