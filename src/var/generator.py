@@ -314,10 +314,27 @@ def _to_batch_vector(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Convert scalar or tensor sampling argument to a batch-aligned vector."""
+    """Convert scalar or tensor sampling argument to a batch-aligned vector.
+
+    Args:
+        value: Scalar or tensor sampling argument.
+        batch_size: Active batch size for decoding.
+        device: Target device.
+        dtype: Target dtype.
+
+    Returns:
+        One-dimensional tensor with shape ``[batch_size]``.
+
+    Raises:
+        ValueError: If tensor value cannot be aligned to ``batch_size``.
+    """
     if isinstance(value, torch.Tensor):
         if value.ndim == 0:
             return value.to(device=device, dtype=dtype).repeat(batch_size)
+        if value.numel() == 1:
+            return value.reshape(1).to(device=device, dtype=dtype).repeat(batch_size)
+        if value.numel() == batch_size:
+            return value.reshape(batch_size).to(device=device, dtype=dtype)
         if value.ndim != 1 or value.shape[0] != batch_size:
             raise ValueError("Expected a [batch_size] tensor for per-sample sampling arguments.")
         return value.to(device=device, dtype=dtype)

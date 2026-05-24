@@ -184,7 +184,13 @@ class TextVARPipeline:
 
         if not path.exists():
             raise FileNotFoundError(f"Tokenizer file not found: {path}")
-        return PreTrainedTokenizerFast(tokenizer_file=str(path))
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(path))
+        if tokenizer.pad_token_id is None:
+            if tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            else:
+                tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        return tokenizer
 
     def _load_vqvae(self, path: Path) -> SemanticTextVQVAE:
         """Load VQ-VAE checkpoint.
