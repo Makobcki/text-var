@@ -163,15 +163,11 @@ class TextVARPipeline:
             turboquant_kv=turboquant_kv,
         )
 
-        decoded_bpe = self._vqvae.decode_from_semantic_indices(
-            generated_levels[0],
-            max_length=max_new_tokens,
-            bos_token_id=self._tokenizer.bos_token_id or self._tokenizer.eos_token_id or 0,
-            eos_token_id=self._tokenizer.eos_token_id,
-            temperature=float(temperature),
-            top_p=float(top_p),
-        )
-        return self._tokenizer.batch_decode(decoded_bpe.tolist(), skip_special_tokens=True)
+        bpe_output_tokens = generated_levels[-1]
+        if bpe_output_tokens.ndim != 2:
+            raise ValueError("Expected 2D BPE output tensor from final generation level.")
+        clipped_bpe_output = bpe_output_tokens[:, :max_new_tokens]
+        return self._tokenizer.batch_decode(clipped_bpe_output.tolist(), skip_special_tokens=True)
 
     @staticmethod
     def _load_tokenizer(path: Path) -> PreTrainedTokenizerFast:
