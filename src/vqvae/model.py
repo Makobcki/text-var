@@ -1,7 +1,8 @@
+from math import ceil
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from math import ceil
 
 
 class VectorQuantizer(nn.Module):
@@ -43,13 +44,20 @@ class VectorQuantizer(nn.Module):
         quantized = torch.matmul(encodings, self.codebook.weight).view(inputs.shape)
 
         if self.training:
-            cluster_size = encodings.sum(dim=0)
-            self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1.0 - self.decay)
-            dw = torch.matmul(encodings.t(), flat_inputs)
-            self.ema_w.mul_(self.decay).add_(dw, alpha=1.0 - self.decay)
-            n = self.ema_cluster_size.sum()
-            cluster_size = ((self.ema_cluster_size + self.epsilon) / (n + self.num_embeddings * self.epsilon)) * n
-            self.codebook.weight.data.copy_(self.ema_w / cluster_size.unsqueeze(1))
+            with torch.no_grad():
+                cluster_size = encodings.sum(dim=0)
+                self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1.0 - self.decay)
+
+                # Граф больше не отслеживается, память свободна
+                dw = torch.matmul(encodings.t(), flat_inputs)
+
+                self.ema_w.mul_(self.decay).add_(dw, alpha=1.0 - self.decay)
+                n = self.ema_cluster_size.sum()
+                cluster_size = (
+                    (self.ema_cluster_size + self.epsilon)
+                    / (n + self.num_embeddings * self.epsilon)
+                ) * n
+                self.codebook.weight.data.copy_(self.ema_w / cluster_size.unsqueeze(1))
 
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
         vq_loss = self.commitment_cost * e_latent_loss
