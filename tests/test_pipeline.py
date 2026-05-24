@@ -80,14 +80,17 @@ def test_generate_flow(monkeypatch, tmp_path: Path) -> None:
         del model
         assert prefix_inputs is not None
         capture["prefix"] = prefix_inputs[0]
-        return [torch.zeros((batch_size, 1), dtype=torch.long, device=device)]
+        return [
+            torch.zeros((batch_size, 1), dtype=torch.long, device=device),
+            torch.tensor([[10, 11, 12, 13]], dtype=torch.long, device=device),
+        ]
 
     monkeypatch.setattr("src.core.pipeline.hybrid_cascade_decode", _fake_decode)
 
     pipeline = TextVARPipeline(cfg)
     result = pipeline.generate("hello", max_new_tokens=4)
 
-    assert result == "1|1|1|1"
+    assert result == "10|11|12|13"
     assert tuple(capture["prefix"].shape) == (1, 1)
     assert int(capture["prefix"][0, 0]) == 1
 
