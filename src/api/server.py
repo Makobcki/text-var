@@ -168,10 +168,15 @@ def _normalize_prompts(prompt: str | list[str]) -> list[str]:
         ValueError: If the prompt batch is empty.
     """
     if isinstance(prompt, str):
-        return [prompt]
-    if not prompt:
-        raise ValueError("Prompt list cannot be empty.")
-    return prompt
+        normalized = [prompt]
+    else:
+        if not prompt:
+            raise ValueError("Prompt list cannot be empty.")
+        normalized = prompt
+
+    if any(not item.strip() for item in normalized):
+        raise ValueError("Prompt must contain non-whitespace characters.")
+    return normalized
 
 
 class ChatChoice(BaseModel):
@@ -280,6 +285,7 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 top_p=request.top_p,
+                turboquant_kv=request.turboquant_kv,
             )
             for prompt in prompts
         ]
