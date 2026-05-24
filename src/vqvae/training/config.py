@@ -21,6 +21,7 @@ class VQVAETrainConfig:
         semantic_tokens: Number of semantic tokens.
         lr: Learning rate.
         level_index: Multiscale level index.
+        gradient_accumulation_steps: Number of micro-steps to accumulate before optimizer step.
     """
 
     output: Path
@@ -33,3 +34,4 @@ class VQVAETrainConfig:
     semantic_tokens: int = 4096
     lr: float = 3e-4
     level_index: int = 2
+    gradient_accumulation_steps: int = 1
