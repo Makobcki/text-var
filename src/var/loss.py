@@ -20,7 +20,8 @@ def _cross_entropy_per_token(
 ) -> torch.Tensor:
     if use_flash and _flash_cross_entropy_loss is not None and logits.is_cuda:
         losses, _ = _flash_cross_entropy_loss(logits, target)
-        return losses
+        if torch.isfinite(losses).all():
+            return losses.reshape(-1)
     flat_logits = logits.reshape(-1, logits.size(-1))
     flat_target = target.reshape(-1)
     ce_ignore_index = ignore_index if ignore_index is not None else -100
@@ -41,6 +42,40 @@ def multiscale_next_scale_cross_entropy(
     use_early_exit_loss: bool = False,
     historical_level0_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    def _weighted_token_loss(
+        per_token_losses: torch.Tensor,
+        *,
+        mask: torch.Tensor | None,
+        masked_loss_weight: float,
+        reference: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Aggregate per-token losses using stable token-count normalization.
+
+        Args:
+            per_token_losses: Flattened vector of valid per-token losses.
+            mask: Optional flattened boolean mask aligned with ``per_token_losses``.
+            masked_loss_weight: Multiplicative weight for masked tokens.
+            reference: Tensor used for device/dtype alignment when returning zeros.
+
+        Returns:
+            Tuple ``(loss_sum, normalizer)`` where ``loss_sum / normalizer`` is the mean.
+        """
+        if per_token_losses.numel() == 0:
+            zero = torch.zeros((), device=reference.device, dtype=reference.dtype)
+            return zero, zero
+
+        if mask is None:
+            return per_token_losses.sum(), torch.tensor(
+                float(per_token_losses.numel()),
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+
+        token_weights = torch.ones_like(per_token_losses, dtype=reference.dtype)
+        token_weights[mask] = float(masked_loss_weight)
+        weighted_losses = per_token_losses * token_weights
+        return weighted_losses.sum(), token_weights.sum().clamp_min(1.0)
+
     def _build_span_mask(
         batch: int,
         seq_len: int,
@@ -64,7 +99,8 @@ def multiscale_next_scale_cross_entropy(
         positions = torch.arange(seq_len, device=device).view(1, 1, -1)
         return ((positions >= starts) & (positions < starts + lengths)).any(dim=1)
 
-    scale_losses = []
+    total_loss_sum: torch.Tensor | None = None
+    total_normalizer: torch.Tensor | None = None
     batch_size = moved_tokens[0].size(0)
     use_flash = bool(getattr(model.cfg, "flash_cross_entropy", True))
     ignore_index = getattr(model.cfg, "pad_token_id", None)
@@ -125,7 +161,6 @@ def multiscale_next_scale_cross_entropy(
         level_weight = (
             level_weights[target_idx] if level_weights and target_idx < len(level_weights) else 1.0
         )
-        current_scale_loss = 0.0
 
         flat_target = target.reshape(-1)
         flat_mask = mask_positions.reshape(-1) if mask_positions is not None else None
@@ -142,24 +177,26 @@ def multiscale_next_scale_cross_entropy(
             valid_tokens = flat_target != ignore_index if ignore_index is not None else None
             if valid_tokens is not None:
                 per_token = per_token[valid_tokens]
+            effective_mask = None
             if flat_mask is not None and flat_mask.any():
                 effective_mask = flat_mask if valid_tokens is None else flat_mask[valid_tokens]
-                masked_part = per_token[effective_mask]
-                unmasked_part = per_token[~effective_mask]
-                if masked_part.numel() > 0 and unmasked_part.numel() > 0:
-                    loss = masked_loss_weight * masked_part.mean() + (1.0 - masked_loss_weight) * unmasked_part.mean()
-                elif masked_part.numel() > 0:
-                    loss = masked_part.mean()
-                else:
-                    loss = unmasked_part.mean()
-            else:
-                loss = per_token.mean()
+            loss_sum, loss_norm = _weighted_token_loss(
+                per_token,
+                mask=effective_mask,
+                masked_loss_weight=masked_loss_weight,
+                reference=pred,
+            )
+            if float(loss_norm.detach().cpu()) == 0.0:
+                continue
 
             if is_early:
-                loss = loss * 0.25
+                loss_sum = loss_sum * 0.25
+            weighted_norm = loss_norm * float(level_weight)
+            weighted_sum = loss_sum * float(level_weight)
+            total_loss_sum = weighted_sum if total_loss_sum is None else (total_loss_sum + weighted_sum)
+            total_normalizer = weighted_norm if total_normalizer is None else (total_normalizer + weighted_norm)
 
-            current_scale_loss += loss
-
-        scale_losses.append(current_scale_loss * level_weight)
-
-    return sum(scale_losses)
+    if total_loss_sum is None or total_normalizer is None:
+        reference = moved_tokens[0]
+        return torch.zeros((), device=reference.device, dtype=torch.float32)
+    return total_loss_sum / total_normalizer.clamp_min(1.0)
