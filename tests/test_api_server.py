@@ -57,6 +57,42 @@ def test_completions_rejects_empty_prompt_batch() -> None:
     assert "Prompt list cannot be empty" in response.json()["detail"]
 
 
+
+
+def test_completions_rejects_blank_prompts() -> None:
+    """Ensure /v1/completions returns 400 for blank prompt values."""
+    server._engine = DummyEngine()
+    client = TestClient(server.app)
+
+    response = client.post("/v1/completions", json={"prompt": "   "})
+
+    assert response.status_code == 400
+    assert "Prompt must contain non-whitespace characters" in response.json()["detail"]
+
+
+def test_completions_forwards_turboquant_flag() -> None:
+    """Ensure /v1/completions forwards turboquant_kv flag to engine params."""
+
+    class CapturingEngine(DummyEngine):
+        def __init__(self) -> None:
+            self.seen_turboquant: list[bool] = []
+
+        def generate_batch(self, params_list):
+            self.seen_turboquant = [bool(params.turboquant_kv) for params in params_list]
+            return super().generate_batch(params_list)
+
+    engine = CapturingEngine()
+    server._engine = engine
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/completions",
+        json={"prompt": "hello", "max_tokens": 2, "turboquant_kv": True},
+    )
+
+    assert response.status_code == 200
+    assert engine.seen_turboquant == [True]
+
 def test_chat_completions_uses_chat_template_markers() -> None:
     """Ensure chat endpoint builds prompt with message boundary markers."""
     server._engine = DummyEngine()
@@ -78,6 +114,41 @@ def test_chat_completions_uses_chat_template_markers() -> None:
     assert "<|im_start|>user" in generated
     assert "<|im_start|>assistant" in generated
 
+
+
+
+def test_completions_returns_nonzero_usage_counts() -> None:
+    """Ensure /v1/completions usage contains derived token counts."""
+    server._engine = DummyEngine()
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/completions",
+        json={"prompt": "alpha beta", "max_tokens": 2},
+    )
+
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_chat_completions_returns_nonzero_usage_counts() -> None:
+    """Ensure /v1/chat/completions usage contains derived token counts."""
+    server._engine = DummyEngine()
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hello world"}]},
+    )
+
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
 
 def test_chat_completions_rejects_stream_mode_until_true_streaming_exists() -> None:
     """Ensure stream mode fails explicitly instead of emulating SSE with one full chunk."""
