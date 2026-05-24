@@ -133,8 +133,11 @@ class TextVARPipeline:
         bpe_tokens = encoded["input_ids"].to(self._device)
         padding_mask = ~encoded["attention_mask"].bool().to(self._device)
 
-        latent_context, _ = self._vqvae.encode_sentence(bpe_tokens, padding_mask=padding_mask)
-        semantic_prefix = latent_context.view(latent_context.shape[0], -1).long()
+        semantic_indices, _ = self._vqvae.encode_sentence(
+            bpe_tokens,
+            padding_mask=padding_mask,
+        )
+        semantic_prefix = semantic_indices.view(semantic_indices.shape[0], -1).long()
         sampling_temperatures = (
             torch.tensor(per_item_temperatures, dtype=torch.float32, device=self._device)
             if per_item_temperatures is not None
@@ -160,6 +163,8 @@ class TextVARPipeline:
             max_length=max_new_tokens,
             bos_token_id=self._tokenizer.bos_token_id or self._tokenizer.eos_token_id or 0,
             eos_token_id=self._tokenizer.eos_token_id,
+            temperature=float(temperature),
+            top_p=float(top_p),
         )
         return self._tokenizer.batch_decode(decoded_bpe.tolist(), skip_special_tokens=True)
 

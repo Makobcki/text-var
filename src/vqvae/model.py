@@ -149,6 +149,8 @@ class SemanticTextVQVAE(nn.Module):
         max_length: int,
         bos_token_id: int,
         eos_token_id: int | None = None,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
     ) -> torch.Tensor:
         """Decode semantic codebook indices into autoregressive BPE ids.
 
@@ -157,15 +159,21 @@ class SemanticTextVQVAE(nn.Module):
             max_length: Maximum number of BPE tokens to generate.
             bos_token_id: Token id used as first autoregressive token.
             eos_token_id: Optional early-stop token id.
+            temperature: Sampling temperature (>0).
+            top_p: Nucleus sampling threshold in (0, 1].
 
         Returns:
             Tensor of generated BPE token ids with shape ``(B, L)``.
 
         Raises:
-            ValueError: If semantic index tensor rank is invalid or max_length < 1.
+            ValueError: If arguments are invalid.
         """
         if int(max_length) < 1:
             raise ValueError("max_length must be >= 1.")
+        if float(temperature) <= 0:
+            raise ValueError("temperature must be > 0.")
+        if not 0 < float(top_p) <= 1:
+            raise ValueError("top_p must be in (0, 1].")
         if semantic_indices.dim() == 1:
             semantic_indices = semantic_indices.unsqueeze(1)
         if semantic_indices.dim() != 2:
@@ -189,8 +197,17 @@ class SemanticTextVQVAE(nn.Module):
                 device=generated.device,
             )
             decoded = self.decoder(tgt=tgt_emb, memory=memory, tgt_mask=tgt_mask)
-            logits = self.lm_head(decoded)
-            next_token = logits[:, -1, :].argmax(dim=-1)
+            logits = self.lm_head(decoded)[:, -1, :] / float(temperature)
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+            sorted_probs = F.softmax(sorted_logits, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            sorted_mask = cumulative_probs > float(top_p)
+            sorted_mask[..., 1:] = sorted_mask[..., :-1].clone()
+            sorted_mask[..., 0] = False
+            filtered_logits = sorted_logits.masked_fill(sorted_mask, float("-inf"))
+            filtered_probs = F.softmax(filtered_logits, dim=-1)
+            sampled_rank = torch.multinomial(filtered_probs, num_samples=1)
+            next_token = sorted_indices.gather(dim=-1, index=sampled_rank).squeeze(-1)
             generated = torch.cat([generated, next_token.unsqueeze(1)], dim=1)
             if eos_token_id is not None and bool((next_token == int(eos_token_id)).all()):
                 break
