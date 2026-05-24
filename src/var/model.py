@@ -305,6 +305,29 @@ class VARTransformer(nn.Module):
                 head_key = f"layer_{layer_idx}_scale_{scale_idx}"
                 self.early_exit_heads[head_key] = nn.Linear(hidden, vocab_size)
 
+    def _validate_token_ids(self, token_ids: torch.Tensor, *, level_idx: int, source: str) -> None:
+        """Validate that token ids are in-range for the given hierarchical level.
+
+        Args:
+            token_ids: Integer token tensor used as embedding indices.
+            level_idx: Hierarchical level index that selects embedding vocabulary.
+            source: Human-readable token source for error messages.
+
+        Raises:
+            ValueError: If token ids contain values outside `[0, vocab_size)`.
+        """
+        vocab_size = int(self.cfg.level_vocab_sizes[level_idx])
+        if token_ids.numel() == 0:
+            return
+
+        min_id = int(token_ids.min().item())
+        max_id = int(token_ids.max().item())
+        if min_id < 0 or max_id >= vocab_size:
+            raise ValueError(
+                f"{source} contains out-of-range token ids for level {level_idx}: "
+                f"valid range is [0, {vocab_size - 1}], observed min={min_id}, max={max_id}."
+            )
+
 
     def _compress_memory(self, x: torch.Tensor, target_tokens: int) -> torch.Tensor:
         seq_len = x.shape[1]
@@ -421,6 +444,7 @@ class VARTransformer(nn.Module):
         for s_idx, scale_input in enumerate(prefix_inputs):
             if s_idx >= target_idx:
                 break
+            self._validate_token_ids(scale_input, level_idx=s_idx, source=f"prefix_inputs[{s_idx}]")
             emb = self.token_embeddings[s_idx](scale_input)
             emb = emb + self.scale_embedding.weight[s_idx].view(1, 1, -1)
             seq_len = scale_input.shape[1]
@@ -473,6 +497,7 @@ class VARTransformer(nn.Module):
         ]
 
         if current_level_input is not None:
+            self._validate_token_ids(current_level_input, level_idx=target_idx, source="current_level_input")
             x = self.token_embeddings[target_idx](current_level_input)
             target_len = current_level_input.shape[1]
         else:
