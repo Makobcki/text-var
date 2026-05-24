@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from src.data.token_cache import TokenCacheMetadata, load_token_cache_metadata
+from src.data.token_cache import load_token_cache_metadata
 from src.vqvae.model import SemanticTextVQVAE
 
 LOGGER = logging.getLogger(__name__)

@@ -100,12 +100,12 @@ class SDPADecoderLayer(nn.Module):
         self.register_buffer("R_v", generate_orthogonal_matrix(self.head_dim, torch.device("cpu")), persistent=True)
 
     def _shape_heads(self, x: torch.Tensor) -> torch.Tensor:
-        b, l, _ = x.shape
-        return x.view(b, l, self.num_heads, self.head_dim).transpose(1, 2)
+        batch_size, seq_len, _ = x.shape
+        return x.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
     def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
-        b, h, l, d = x.shape
-        return x.transpose(1, 2).contiguous().view(b, l, h * d)
+        batch_size, num_heads, seq_len, head_dim = x.shape
+        return x.transpose(1, 2).contiguous().view(batch_size, seq_len, num_heads * head_dim)
 
     def _compress_memory(self, x: torch.Tensor, target_tokens: int) -> torch.Tensor:
         seq_len = x.shape[1]
@@ -186,10 +186,10 @@ class SDPADecoderLayer(nn.Module):
         x1 = self.norm1(x)
         qkv = self.self_qkv(x1)
         q, k, v = qkv.chunk(3, dim=-1)
-        b, l, _ = x.shape
-        q = q.view(b, l, self.num_heads, self.head_dim)
-        k = k.view(b, l, self.num_heads, self.head_dim)
-        v = v.view(b, l, self.num_heads, self.head_dim)
+        batch_size, seq_len, _ = x.shape
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
         if rotary_freqs_tgt is not None:
             q, k = apply_rotary_pos_emb(q, k, rotary_freqs_tgt)
         if past_key_value is not None and not (
@@ -407,13 +407,10 @@ class VARTransformer(nn.Module):
 
         if prefix_inputs:
             b = prefix_inputs[0].shape[0]
-            device = prefix_inputs[0].device
         elif current_level_input is not None:
             b = current_level_input.shape[0]
-            device = current_level_input.device
         else:
             b = batch_size if batch_size else 1
-            device = self.target_token.device
 
         target_idx = target_level if target_level is not None else len(prefix_inputs)
 
@@ -426,14 +423,14 @@ class VARTransformer(nn.Module):
                 break
             emb = self.token_embeddings[s_idx](scale_input)
             emb = emb + self.scale_embedding.weight[s_idx].view(1, 1, -1)
-            l = scale_input.shape[1]
-            rotary_freqs_tgt = self.rotary_emb(emb, l)
+            seq_len = scale_input.shape[1]
+            rotary_freqs_tgt = self.rotary_emb(emb, seq_len)
 
             x_scale = emb
             use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
             local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
             for block in self.blocks:
-                if local_radius > 0 and l > 1:
+                if local_radius > 0 and seq_len > 1:
                     x_scale = self._run_prefix_block_with_sliding_window(
                         block=block,
                         x_scale=x_scale,

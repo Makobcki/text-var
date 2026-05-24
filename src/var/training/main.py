@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from src.var.checkpoint import load_checkpoint, restore_training_state, save_checkpoint
-from src.var.training.cli import build_parser
 from src.var.training.config import TrainConfig, load_train_config
 from src.var.loss import multiscale_next_scale_cross_entropy
 from src.var.model import VARTransformer
@@ -154,6 +153,12 @@ def _set_trainable(module: torch.nn.Module, enabled: bool) -> None:
 
 
 def apply_phase_freezing(model: VARTransformer, phase_idx: int) -> None:
+    """Apply progressive per-phase freezing policy to VAR model modules.
+
+    Args:
+        model: Transformer model to reconfigure.
+        phase_idx: Zero-based phase index selecting active scale/block subset.
+    """
     for param in model.parameters():
         param.requires_grad = False
 
@@ -166,7 +171,9 @@ def apply_phase_freezing(model: VARTransformer, phase_idx: int) -> None:
     block_end = depth if phase == levels - 1 else min(depth, (phase + 1) * segment)
 
     _set_trainable(model.scale_embedding, phase == 0)
-    _set_trainable(model.local_position_embedding, phase == 0)
+    local_position_embedding = getattr(model, "local_position_embedding", None)
+    if isinstance(local_position_embedding, torch.nn.Module):
+        _set_trainable(local_position_embedding, phase == 0)
     model.target_token.requires_grad = phase == 0
 
     _set_trainable(model.token_embeddings[phase], True)

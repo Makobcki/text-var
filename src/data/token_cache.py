@@ -38,7 +38,7 @@ class TokenCacheMetadata:
 
     def __post_init__(self) -> None:
         vocab_sizes = tuple(int(v) for v in self.level_vocab_sizes)
-        lengths = tuple(int(l) for l in self.level_lengths)
+        lengths = tuple(int(length_value) for length_value in self.level_lengths)
         object.__setattr__(self, "level_vocab_sizes", vocab_sizes)
         object.__setattr__(self, "level_lengths", lengths)
 
