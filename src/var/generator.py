@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Union
 
 import torch
@@ -13,10 +14,159 @@ class RollbackEvent(RuntimeError):
         self.block_end = block_end
 
 
+@dataclass(frozen=True)
+class TurboQuantConfig:
+    """Configuration for TurboQuant-inspired KV compression."""
+
+    key_bits: int = 3
+    value_bits: int = 4
+    qjl_residual_scale: float = 0.5
+
+
+class TurboQuantCodec:
+    """Quantize/dequantize KV tensors with random orthogonal rotation."""
+
+    def __init__(self, cfg: TurboQuantConfig, head_dim: int, device: torch.device) -> None:
+        self.cfg = cfg
+        self.head_dim = head_dim
+        self.rotation = self._make_rotation(head_dim=head_dim, device=device)
+        self.inv_rotation = self.rotation.transpose(0, 1)
+        self._key_scales: list[torch.Tensor] = []
+        self._key_zeros: list[torch.Tensor] = []
+        self._value_scales: list[torch.Tensor] = []
+        self._value_zeros: list[torch.Tensor] = []
+        self._key_residual_signs: list[torch.Tensor] = []
+        self._value_residual_signs: list[torch.Tensor] = []
+
+    def init_layer_state(self) -> None:
+        self._key_scales.append(torch.empty(0))
+        self._key_zeros.append(torch.empty(0))
+        self._value_scales.append(torch.empty(0))
+        self._value_zeros.append(torch.empty(0))
+        self._key_residual_signs.append(torch.empty(0, dtype=torch.bool))
+        self._value_residual_signs.append(torch.empty(0, dtype=torch.bool))
+
+    def allocate_layer(self, layer_idx: int, b: int, w: int, h: int, device: torch.device) -> None:
+        base_shape = (b, w, h, 1)
+        resid_shape = (b, w, h, self.head_dim)
+        self._key_scales[layer_idx] = torch.empty(base_shape, dtype=torch.float32, device=device)
+        self._key_zeros[layer_idx] = torch.empty(base_shape, dtype=torch.float32, device=device)
+        self._value_scales[layer_idx] = torch.empty(base_shape, dtype=torch.float32, device=device)
+        self._value_zeros[layer_idx] = torch.empty(base_shape, dtype=torch.float32, device=device)
+        self._key_residual_signs[layer_idx] = torch.empty(resid_shape, dtype=torch.bool, device=device)
+        self._value_residual_signs[layer_idx] = torch.empty(resid_shape, dtype=torch.bool, device=device)
+
+    def packed_dim(self, bits: int) -> int:
+        """Return packed byte width for one head vector."""
+        return (self.head_dim * bits + 7) // 8
+
+    def quantize_step(self, layer_idx: int, key: torch.Tensor, value: torch.Tensor, write_ptr: int) -> tuple[torch.Tensor, torch.Tensor]:
+        qk, ks, kz, kr = self._quantize_tensor(key, bits=self.cfg.key_bits)
+        qv, vs, vz, vr = self._quantize_tensor(value, bits=self.cfg.value_bits)
+        sl = slice(write_ptr, write_ptr + 1)
+        self._key_scales[layer_idx][:, sl] = ks
+        self._key_zeros[layer_idx][:, sl] = kz
+        self._value_scales[layer_idx][:, sl] = vs
+        self._value_zeros[layer_idx][:, sl] = vz
+        self._key_residual_signs[layer_idx][:, sl] = kr
+        self._value_residual_signs[layer_idx][:, sl] = vr
+        return self._pack_bits(qk, self.cfg.key_bits), self._pack_bits(qv, self.cfg.value_bits)
+
+    def dequantize_view(self, view: RingKVCacheView) -> tuple[torch.Tensor, torch.Tensor]:
+        if view.layer_idx < 0 or view.layer_idx >= len(self._key_scales):
+            raise ValueError(f"Invalid layer_idx for RingKVCacheView: {view.layer_idx}")
+        layer_idx = view.layer_idx
+        positions = view.positions
+        key = self._dequantize_tensor(
+            self._unpack_bits(view.keys.index_select(1, positions), self.cfg.key_bits).to(torch.float32),
+            self._key_scales[layer_idx].index_select(1, positions),
+            self._key_zeros[layer_idx].index_select(1, positions),
+            self._key_residual_signs[layer_idx].index_select(1, positions),
+        )
+        value = self._dequantize_tensor(
+            self._unpack_bits(view.values.index_select(1, positions), self.cfg.value_bits).to(torch.float32),
+            self._value_scales[layer_idx].index_select(1, positions),
+            self._value_zeros[layer_idx].index_select(1, positions),
+            self._value_residual_signs[layer_idx].index_select(1, positions),
+        )
+        return key.to(dtype=torch.float16), value.to(dtype=torch.float16)
+
+    def quantized_view_payload(
+        self,
+        view: RingKVCacheView,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return ordered packed KV and metadata without dense materialization."""
+        if view.layer_idx < 0 or view.layer_idx >= len(self._key_scales):
+            raise ValueError(f"Invalid layer_idx for RingKVCacheView: {view.layer_idx}")
+        layer_idx = view.layer_idx
+        positions = view.positions
+        return (
+            view.keys.index_select(1, positions),
+            view.values.index_select(1, positions),
+            self._key_scales[layer_idx].index_select(1, positions),
+            self._value_scales[layer_idx].index_select(1, positions),
+            self._key_residual_signs[layer_idx].index_select(1, positions),
+            self._value_residual_signs[layer_idx].index_select(1, positions),
+        )
+
+    def _quantize_tensor(self, x: torch.Tensor, bits: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        xr = torch.einsum("bthd,df->bthf", x.to(torch.float32), self.rotation)
+        xmin = xr.amin(dim=-1, keepdim=True)
+        xmax = xr.amax(dim=-1, keepdim=True)
+        levels = float((1 << bits) - 1)
+        scale = torch.clamp((xmax - xmin) / levels, min=1e-6)
+        zero = xmin
+        q = torch.clamp(torch.round((xr - zero) / scale), min=0, max=levels).to(torch.uint8)
+        recon = q.to(torch.float32) * scale + zero
+        residual_sign = (xr - recon) >= 0
+        return q, scale, zero, residual_sign
+
+    def _dequantize_tensor(self, q: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor, residual_sign: torch.Tensor) -> torch.Tensor:
+        residual = torch.where(residual_sign, 1.0, -1.0) * scale * self.cfg.qjl_residual_scale
+        xr = (q * scale) + zero + residual
+        return torch.einsum("bthd,df->bthf", xr, self.inv_rotation)
+
+    def _make_rotation(self, head_dim: int, device: torch.device) -> torch.Tensor:
+        gaussian = torch.randn((head_dim, head_dim), dtype=torch.float32, device=device)
+        q, _ = torch.linalg.qr(gaussian)
+        return q
+
+    def _pack_bits(self, values: torch.Tensor, bits: int) -> torch.Tensor:
+        flat = values.to(torch.int32).reshape(-1, self.head_dim)
+        packed_cols = self.packed_dim(bits)
+        out = torch.zeros((flat.shape[0], packed_cols), dtype=torch.uint8, device=values.device)
+        mask = (1 << bits) - 1
+        for i in range(self.head_dim):
+            v = flat[:, i] & mask
+            bit_offset = i * bits
+            byte_idx = bit_offset // 8
+            shift = bit_offset % 8
+            out[:, byte_idx] |= (v << shift).to(torch.uint8)
+            spill = shift + bits - 8
+            if spill > 0 and byte_idx + 1 < packed_cols:
+                out[:, byte_idx + 1] |= (v >> (bits - spill)).to(torch.uint8)
+        return out.view(*values.shape[:-1], packed_cols)
+
+    def _unpack_bits(self, packed: torch.Tensor, bits: int) -> torch.Tensor:
+        packed_flat = packed.to(torch.int32).reshape(-1, packed.shape[-1])
+        out = torch.zeros((packed_flat.shape[0], self.head_dim), dtype=torch.uint8, device=packed.device)
+        mask = (1 << bits) - 1
+        for i in range(self.head_dim):
+            bit_offset = i * bits
+            byte_idx = bit_offset // 8
+            shift = bit_offset % 8
+            v = (packed_flat[:, byte_idx] >> shift) & mask
+            spill = shift + bits - 8
+            if spill > 0 and byte_idx + 1 < packed_flat.shape[1]:
+                v |= (packed_flat[:, byte_idx + 1] << (bits - spill)) & mask
+            out[:, i] = v.to(torch.uint8)
+        return out.view(*packed.shape[:-1], self.head_dim)
+
+
 class KVCacheRingBuffer:
     """Ring buffer for per-layer KV tensors used during autoregressive decoding."""
 
-    def __init__(self, max_window: int) -> None:
+    def __init__(self, max_window: int, turboquant_config: TurboQuantConfig | None = None) -> None:
         """Initialize the ring buffer.
 
         Args:
@@ -27,6 +177,8 @@ class KVCacheRingBuffer:
         self._values: list[torch.Tensor] = []
         self._lengths: list[int] = []
         self._write_ptrs: list[int] = []
+        self._codec: TurboQuantCodec | None = None
+        self._turboquant_config = turboquant_config
 
     def update(
         self,
@@ -57,23 +209,33 @@ class KVCacheRingBuffer:
             cur_len = self._lengths[layer_idx]
             if cur_len == 0:
                 positions = torch.empty((0,), dtype=torch.long, device=key_buffer.device)
-                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions))
+                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions, codec=self._codec, layer_idx=layer_idx))
                 continue
             if cur_len < self.max_window:
                 positions = torch.arange(cur_len, device=key_buffer.device, dtype=torch.long)
-                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions))
+                ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions, codec=self._codec, layer_idx=layer_idx))
                 continue
             ptr = self._write_ptrs[layer_idx]
             positions = (torch.arange(self.max_window, device=key_buffer.device, dtype=torch.long) + ptr) % self.max_window
-            ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions))
+            ordered.append(RingKVCacheView(keys=key_buffer, values=self._values[layer_idx], positions=positions, codec=self._codec, layer_idx=layer_idx))
         return ordered
 
     def _allocate(self, present_key_values: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
         """Allocate fixed-size KV storage for each layer."""
         for key, value in present_key_values:
             b, _, h, d = key.shape
-            self._keys.append(torch.empty((b, self.max_window, h, d), dtype=key.dtype, device=key.device))
-            self._values.append(torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device))
+            if self._turboquant_config is not None:
+                if self._codec is None:
+                    self._codec = TurboQuantCodec(self._turboquant_config, head_dim=d, device=key.device)
+                self._codec.init_layer_state()
+                key_pack_dim = self._codec.packed_dim(self._turboquant_config.key_bits)
+                value_pack_dim = self._codec.packed_dim(self._turboquant_config.value_bits)
+                self._keys.append(torch.empty((b, self.max_window, h, key_pack_dim), dtype=torch.uint8, device=key.device))
+                self._values.append(torch.empty((b, self.max_window, h, value_pack_dim), dtype=torch.uint8, device=value.device))
+                self._codec.allocate_layer(len(self._keys) - 1, b, self.max_window, h, key.device)
+            else:
+                self._keys.append(torch.empty((b, self.max_window, h, d), dtype=key.dtype, device=key.device))
+                self._values.append(torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device))
             self._lengths.append(0)
             self._write_ptrs.append(0)
 
@@ -82,8 +244,13 @@ class KVCacheRingBuffer:
         step_tokens = key[:, -1:, :, :]
         step_values = value[:, -1:, :, :]
         write_ptr = self._write_ptrs[layer_idx]
-        self._keys[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_tokens
-        self._values[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_values
+        if self._codec is None:
+            self._keys[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_tokens
+            self._values[layer_idx][:, write_ptr : write_ptr + 1, :, :] = step_values
+        else:
+            qk, qv = self._codec.quantize_step(layer_idx, step_tokens, step_values, write_ptr)
+            self._keys[layer_idx][:, write_ptr : write_ptr + 1, :, :] = qk
+            self._values[layer_idx][:, write_ptr : write_ptr + 1, :, :] = qv
         self._write_ptrs[layer_idx] = (write_ptr + 1) % self.max_window
         self._lengths[layer_idx] = min(self.max_window, self._lengths[layer_idx] + 1)
 
@@ -388,6 +555,7 @@ def hybrid_cascade_decode(
     min_block_size_lvl2: int = 16,
     max_seams_per_inpaint_pass: int = 10,
     bpe_chunk_length: int = 128,
+    turboquant_kv: bool = False,
 ) -> list[torch.Tensor]:
     max_local_window = 1024
     batch = int(batch_size)
@@ -450,7 +618,8 @@ def hybrid_cascade_decode(
             f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
         )
     past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None = None
-    cache_ring_buffer = KVCacheRingBuffer(max_window=max_local_window)
+    turbo_cfg = TurboQuantConfig() if turboquant_kv else None
+    cache_ring_buffer = KVCacheRingBuffer(max_window=max_local_window, turboquant_config=turbo_cfg)
     finished = torch.zeros(batch, dtype=torch.bool, device=device)
     actual_lvl_1_len = len_lvl_1
     chunk_size = max(1, int(bpe_chunk_length))
@@ -466,6 +635,9 @@ def hybrid_cascade_decode(
                 if lvl_1_sequence.shape[1] == 0
                 else lvl_1_sequence[:, -1:].contiguous()
             )
+            if bool(torch.any(finished).item()):
+                token_input = token_input.clone()
+                token_input[finished] = int(model.cfg.pad_token_id)
             next_token, _, _, past_key_values = _decode_next_ar_token_with_cache(
                 model,
                 prefix_inputs=[global_level_0_memory],
@@ -479,6 +651,12 @@ def hybrid_cascade_decode(
                 past_key_values=past_key_values,
                 cache_ring_buffer=cache_ring_buffer,
             )
+            if bool(torch.any(finished).item()):
+                next_token = torch.where(
+                    finished,
+                    torch.full_like(next_token, int(model.cfg.pad_token_id)),
+                    next_token,
+                )
             is_eos = next_token == int(model.cfg.eos_token_id)
             finished |= is_eos
             lvl_1_sequence = torch.cat([lvl_1_sequence, next_token.unsqueeze(1)], dim=1)

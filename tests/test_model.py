@@ -49,10 +49,9 @@ def test_prefix_uses_sliding_window_causal_attention_when_radius_enabled() -> No
     current_tokens = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
     _ = model(prefix_tokens, target_level=1, current_level_input=current_tokens)
 
-    assert len(capture_layer.masks) == 5
-    assert all(mask is None for mask in capture_layer.masks)
-    assert capture_layer.causal_flags[:4] == [True, True, True, True]
-    assert capture_layer.causal_flags[4] is True
+    assert len(capture_layer.masks) == 2
+    assert capture_layer.masks[0] is not None
+    assert capture_layer.causal_flags[0] is False
 
 
 def test_prefix_mask_disabled_when_radius_zero() -> None:

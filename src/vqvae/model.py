@@ -63,12 +63,14 @@ class SemanticTextVQVAE(nn.Module):
         vocab_size: int = 32000,
         hidden_size: int = 1024,
         num_semantic_tokens: int = 4096,
+        semantic_sequence_length: int = 1,
         pad_token_id: int = 0,
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.pad_token_id = int(pad_token_id)
+        self.semantic_sequence_length = max(1, int(semantic_sequence_length))
 
         self.embedding = nn.Embedding(vocab_size, hidden_size)
 
@@ -107,12 +109,11 @@ class SemanticTextVQVAE(nn.Module):
         x = self.embedding(bpe_tokens)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        mask_expanded = (~padding_mask).unsqueeze(-1).float()
-        sentence_vector = (encoded * mask_expanded).sum(dim=1) / (
-            mask_expanded.sum(dim=1) + 1e-9
-        )
-
-        _, vq_loss, semantic_idx = self.quantizer(sentence_vector)
+        semantic_inputs = F.adaptive_avg_pool1d(
+            encoded.transpose(1, 2),
+            self.semantic_sequence_length,
+        ).transpose(1, 2)
+        _, vq_loss, semantic_idx = self.quantizer(semantic_inputs)
         return semantic_idx, vq_loss
 
     def decode_from_semantic_indices(
@@ -145,7 +146,7 @@ class SemanticTextVQVAE(nn.Module):
             raise ValueError("semantic_indices must have shape (B,) or (B, S).")
 
         semantic_features = self.quantizer.codebook(semantic_indices.long())
-        memory = semantic_features.mean(dim=1, keepdim=True)
+        memory = semantic_features
 
         batch_size = semantic_indices.shape[0]
         generated = torch.full(
@@ -179,13 +180,13 @@ class SemanticTextVQVAE(nn.Module):
         x = self.embedding(bpe_tokens)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        mask_expanded = (~padding_mask).unsqueeze(-1).float()
-        sentence_vector = (encoded * mask_expanded).sum(dim=1) / (
-            mask_expanded.sum(dim=1) + 1e-9
-        )
+        semantic_inputs = F.adaptive_avg_pool1d(
+            encoded.transpose(1, 2),
+            self.semantic_sequence_length,
+        ).transpose(1, 2)
 
         # --- 2. ЭТАП КВАНТОВАНИЯ ---
-        quantized, vq_loss, semantic_idx = self.quantizer(sentence_vector)
+        quantized, vq_loss, semantic_idx = self.quantizer(semantic_inputs)
 
         # --- 3. ЭТАП ДЕКОДИРОВАНИЯ (Causal AR Reconstruction) ---
         # Сдвигаем токены для входа декодера, чтобы исключить читерство через self-attention
@@ -193,7 +194,7 @@ class SemanticTextVQVAE(nn.Module):
         tgt_emb = self.embedding(tgt_tokens)
 
         # Превращаем квантованный вектор предложения в контекст (memory) для Cross-Attention
-        memory = quantized.unsqueeze(1)  # Формат: (B, 1, hidden_size)
+        memory = quantized  # Формат: (B, S_sem, hidden_size)
 
         # Казуальная маска для декодера
         device = bpe_tokens.device

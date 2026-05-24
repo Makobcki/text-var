@@ -23,6 +23,7 @@ class GenerationParams:
     max_tokens: int
     temperature: float = 1.0
     top_p: float = 1.0
+    turboquant_kv: bool = False
 
 
 class TextVAREngine:
@@ -50,6 +51,7 @@ class TextVAREngine:
             max_new_tokens=params.max_tokens,
             temperature=params.temperature,
             top_p=params.top_p,
+            turboquant_kv=params.turboquant_kv,
         )
 
     def generate_batch(self, params_list: list[GenerationParams]) -> list[str]:
@@ -79,11 +81,12 @@ class TextVAREngine:
         """
         grouped: Dict[int, List[Tuple[int, GenerationParams]]] = {}
         for index, params in enumerate(params_list):
-            key = params.max_tokens
+            key = (params.max_tokens, params.turboquant_kv)
             grouped.setdefault(key, []).append((index, params))
 
         results: list[str] = [""] * len(params_list)
-        for max_tokens, grouped_items in grouped.items():
+        for group_key, grouped_items in grouped.items():
+            max_tokens, turboquant_kv = group_key
             prompts = [item.prompt for _, item in grouped_items]
             temperatures = [item.temperature for _, item in grouped_items]
             top_ps = [item.top_p for _, item in grouped_items]
@@ -92,6 +95,7 @@ class TextVAREngine:
                 max_new_tokens=max_tokens,
                 per_item_temperatures=temperatures,
                 per_item_top_ps=top_ps,
+                turboquant_kv=turboquant_kv,
             )
             for output_idx, (original_idx, _) in enumerate(grouped_items):
                 results[original_idx] = outputs[output_idx]

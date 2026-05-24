@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -6,6 +7,11 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from src.var.training.config import VARConfig
+from src.var.turboquant_triton import TurboQuantTritonInputs, turboquant_attention
+from src.var.turboquant_math import generate_orthogonal_matrix
+
+if TYPE_CHECKING:
+    from src.var.generator import TurboQuantCodec
 
 
 @dataclass(frozen=True)
@@ -21,6 +27,8 @@ class RingKVCacheView:
     keys: torch.Tensor
     values: torch.Tensor
     positions: torch.Tensor
+    codec: "TurboQuantCodec | None" = None
+    layer_idx: int = -1
 
 
 class RotaryEmbedding(nn.Module):
@@ -86,6 +94,8 @@ class SDPADecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(hidden)
         self.dropout = nn.Dropout(dropout)
         self.attention_dropout = float(dropout)
+        self.register_buffer("R_k", generate_orthogonal_matrix(self.head_dim, torch.device("cpu")), persistent=True)
+        self.register_buffer("R_v", generate_orthogonal_matrix(self.head_dim, torch.device("cpu")), persistent=True)
 
     def _shape_heads(self, x: torch.Tensor) -> torch.Tensor:
         b, l, _ = x.shape
@@ -117,6 +127,8 @@ class SDPADecoderLayer(nn.Module):
         """
         if isinstance(past_key_value, RingKVCacheView):
             positions = past_key_value.positions
+            if past_key_value.codec is not None:
+                return past_key_value.codec.dequantize_view(past_key_value)
             return (
                 past_key_value.keys.index_select(1, positions),
                 past_key_value.values.index_select(1, positions),
@@ -144,20 +156,61 @@ class SDPADecoderLayer(nn.Module):
         v = v.view(b, l, self.num_heads, self.head_dim)
         if rotary_freqs_tgt is not None:
             q, k = apply_rotary_pos_emb(q, k, rotary_freqs_tgt)
-        if past_key_value is not None:
+        if past_key_value is not None and not (
+            bool(getattr(self, "use_turboquant", False))
+            and isinstance(past_key_value, RingKVCacheView)
+            and past_key_value.codec is not None
+        ):
             past_k, past_v = self._materialize_past(past_key_value)
             k = torch.cat([past_k, k], dim=1)
             v = torch.cat([past_v, v], dim=1)
         present_key_value = (k, v)
         qh, kh, vh = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        self_attn = F.scaled_dot_product_attention(
-            qh,
-            kh,
-            vh,
-            attn_mask=self_attn_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=self_is_causal and self_attn_mask is None,
-        )
+        can_use_turboquant = isinstance(past_key_value, RingKVCacheView) and past_key_value.codec is not None
+        if bool(getattr(self, "use_turboquant", False)) and can_use_turboquant and self_attn_mask is None:
+            assert past_key_value.codec is not None
+            pk, pv, ks, vs, ksign, vsign = past_key_value.codec.quantized_view_payload(past_key_value)
+            kq_cur, ksc_cur, _, ksg_cur = past_key_value.codec._quantize_tensor(k, bits=past_key_value.codec.cfg.key_bits)
+            vq_cur, vsc_cur, _, vsg_cur = past_key_value.codec._quantize_tensor(v, bits=past_key_value.codec.cfg.value_bits)
+            pk = torch.cat([pk, past_key_value.codec._pack_bits(kq_cur, past_key_value.codec.cfg.key_bits)], dim=1)
+            pv = torch.cat([pv, past_key_value.codec._pack_bits(vq_cur, past_key_value.codec.cfg.value_bits)], dim=1)
+            ks = torch.cat([ks, ksc_cur], dim=1)
+            vs = torch.cat([vs, vsc_cur], dim=1)
+            ksign = torch.cat([ksign, ksg_cur], dim=1)
+            vsign = torch.cat([vsign, vsg_cur], dim=1)
+            qh = torch.einsum("blhd,df->blhf", q, self.R_k.to(q.device).transpose(0, 1)).transpose(1, 2)
+            tq_inputs = TurboQuantTritonInputs(
+                q=qh,
+                k_quant=pk.transpose(1, 2).contiguous(),
+                v_quant=pv.transpose(1, 2).contiguous(),
+                k_scales=ks.transpose(1, 2).contiguous(),
+                v_scales=vs.transpose(1, 2).contiguous(),
+                k_qjl_signs=ksign.transpose(1, 2).contiguous(),
+                v_qjl_signs=vsign.transpose(1, 2).contiguous(),
+                bits=int(past_key_value.codec.cfg.key_bits),
+                qjl_residual_scale=float(past_key_value.codec.cfg.qjl_residual_scale),
+            )
+            present_key_value = (k[:, -1:, :, :], v[:, -1:, :, :])
+            self_attn = turboquant_attention(
+                tq_inputs,
+                is_causal=self_is_causal,
+                fallback_k=kh[:, :, -1:, :],
+                fallback_v=vh[:, :, -1:, :],
+            )
+            self_attn = torch.einsum(
+                "blhd,df->blhf",
+                self_attn.transpose(1, 2),
+                self.R_v.to(self_attn.device),
+            ).transpose(1, 2)
+        else:
+            self_attn = F.scaled_dot_product_attention(
+                qh,
+                kh,
+                vh,
+                attn_mask=self_attn_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                is_causal=self_is_causal and self_attn_mask is None,
+            )
         x = x + self.dropout(self.self_out(self._merge_heads(self_attn)))
 
         x2 = self.norm2(x)
@@ -226,6 +279,42 @@ class VARTransformer(nn.Module):
             return x
         return F.adaptive_avg_pool1d(x.transpose(1, 2), keep).transpose(1, 2)
 
+    def _maybe_turboquant_memory(self, x: torch.Tensor) -> torch.Tensor:
+        """Compress/decompress cross-attention memory for memory reduction simulation."""
+        turbo_cfg = getattr(self.cfg, "turboquant_memory", None)
+        if turbo_cfg is None or not isinstance(turbo_cfg, dict):
+            return x
+        enabled = bool(turbo_cfg.get("enabled", False))
+        if not enabled:
+            return x
+        from src.var.generator import TurboQuantCodec, TurboQuantConfig
+
+        num_heads = int(self.cfg.num_heads)
+        head_dim = x.shape[-1] // num_heads
+        if head_dim * num_heads != x.shape[-1]:
+            return x
+        shaped = x.view(x.shape[0], x.shape[1], num_heads, head_dim)
+        cfg = TurboQuantConfig(
+            key_bits=int(turbo_cfg.get("key_bits", 3)),
+            value_bits=int(turbo_cfg.get("value_bits", 4)),
+            qjl_residual_scale=float(turbo_cfg.get("qjl_residual_scale", 0.5)),
+        )
+        codec = TurboQuantCodec(cfg=cfg, head_dim=head_dim, device=x.device)
+        quant, scale, zero, signs = codec._quantize_tensor(shaped, bits=cfg.value_bits)
+        packed = codec._pack_bits(quant, cfg.value_bits)
+        unpacked = codec._unpack_bits(packed, cfg.value_bits).to(torch.float32)
+        deq = codec._dequantize_tensor(unpacked, scale, zero, signs)
+        return deq.view_as(x).to(dtype=x.dtype)
+
+    def _build_local_causal_mask(self, seq_len: int, radius: int, device: torch.device) -> torch.Tensor:
+        """Create additive local causal mask for vectorized prefix attention."""
+        idx = torch.arange(seq_len, device=device)
+        col = idx.view(1, -1)
+        row = idx.view(-1, 1)
+        allow = (col <= row) & ((row - col) < max(1, radius))
+        mask = torch.full((seq_len, seq_len), float("-inf"), device=device)
+        return mask.masked_fill(allow, 0.0)
+
     def _run_prefix_block_with_sliding_window(
         self,
         block: SDPADecoderLayer,
@@ -246,23 +335,16 @@ class VARTransformer(nn.Module):
         Returns:
             Updated prefix features.
         """
-        states: list[torch.Tensor] = []
-        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None
-        for idx in range(x_scale.shape[1]):
-            token = x_scale[:, idx : idx + 1, :]
-            token_freqs = rotary_freqs_tgt[idx : idx + 1]
-            out_token, present = block(
-                tgt=token,
-                memory=current_context,
-                self_attn_mask=None,
-                self_is_causal=True,
-                rotary_freqs_tgt=token_freqs,
-                past_key_value=past_key_value,
-            )
-            states.append(out_token)
-            keep = max(1, radius)
-            past_key_value = (present[0][:, -keep:, :, :], present[1][:, -keep:, :, :])
-        return torch.cat(states, dim=1)
+        mask = self._build_local_causal_mask(x_scale.shape[1], radius, x_scale.device)
+        out, _ = block(
+            tgt=x_scale,
+            memory=current_context,
+            self_attn_mask=mask,
+            self_is_causal=False,
+            rotary_freqs_tgt=rotary_freqs_tgt,
+            past_key_value=None,
+        )
+        return out
 
     def forward(
         self,
@@ -350,9 +432,10 @@ class VARTransformer(nn.Module):
             compress_tokens = self.cfg.level_lengths[max(0, s_idx - 1)] if compact_memory_for_final_level else encoded.shape[1]
             compressed = self._compress_memory(encoded, target_tokens=compress_tokens)
             last_scale_memory = compressed
-            current_context = torch.cat([null_mem, compressed], dim=1)
+            current_context = self._maybe_turboquant_memory(torch.cat([null_mem, compressed], dim=1))
 
         final_memory = torch.cat([null_mem, last_scale_memory], dim=1) if target_idx > 0 else null_mem
+        final_memory = self._maybe_turboquant_memory(final_memory)
 
         if current_level_input is not None:
             x = self.token_embeddings[target_idx](current_level_input)
