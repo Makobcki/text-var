@@ -81,6 +81,13 @@ def run_training(
     save_vqvae_checkpoint({
             "model": model.state_dict(),
             "steps": step,
+            "model_config": {
+                "vocab_size": int(model.vocab_size),
+                "hidden_size": int(model.hidden_size),
+                "num_semantic_tokens": int(model.quantizer.num_embeddings),
+                "semantic_sequence_length": int(model.semantic_sequence_length),
+                "pad_token_id": int(model.pad_token_id),
+            },
             "metadata": TokenCacheMetadata(
                 kind=metadata.kind,
                 level_vocab_sizes=(vocab_size,),

@@ -202,11 +202,31 @@ class TextVARPipeline:
         if not path.exists():
             raise FileNotFoundError(f"VQ-VAE checkpoint not found: {path}")
 
-        payload = torch.load(path, map_location="cpu")
+        payload = torch.load(path, map_location="cpu", weights_only=False)
         state_dict: dict[str, Any] = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
 
-        vocab_size = int(payload.get("metadata", {}).get("level_vocab_sizes", [32000])[0]) if isinstance(payload, dict) else 32000
-        model = SemanticTextVQVAE(vocab_size=vocab_size)
+        if not isinstance(payload, dict):
+            raise ValueError("VQ-VAE checkpoint payload must be a dictionary.")
+        model_config = payload.get("model_config")
+        if not isinstance(model_config, dict):
+            raise ValueError("VQ-VAE checkpoint model_config is required for loading.")
+        required_fields = (
+            "vocab_size",
+            "hidden_size",
+            "num_semantic_tokens",
+            "semantic_sequence_length",
+            "pad_token_id",
+        )
+        for field_name in required_fields:
+            if field_name not in model_config:
+                raise ValueError(f"VQ-VAE checkpoint model_config.{field_name} is required for loading.")
+        model = SemanticTextVQVAE(
+            vocab_size=int(model_config["vocab_size"]),
+            hidden_size=int(model_config["hidden_size"]),
+            num_semantic_tokens=int(model_config["num_semantic_tokens"]),
+            semantic_sequence_length=int(model_config["semantic_sequence_length"]),
+            pad_token_id=int(model_config["pad_token_id"]),
+        )
         model.load_state_dict(state_dict, strict=False)
         for param in model.parameters():
             param.requires_grad = False
@@ -228,12 +248,15 @@ class TextVARPipeline:
         if not path.exists():
             raise FileNotFoundError(f"VAR checkpoint not found: {path}")
 
-        payload = torch.load(path, map_location="cpu")
+        payload = torch.load(path, map_location="cpu", weights_only=False)
         state_dict: dict[str, Any] = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
 
-        cfg = VARConfig()
-        if isinstance(payload, dict) and "model_config" in payload:
-            cfg = VARConfig.from_dict(dict(payload["model_config"]))
+        if not isinstance(payload, dict):
+            raise ValueError("VAR checkpoint payload must be a dictionary.")
+        model_config = payload.get("model_config")
+        if not isinstance(model_config, dict):
+            raise ValueError("VAR checkpoint model_config is required for loading.")
+        cfg = VARConfig.from_dict(dict(model_config))
         model = VARTransformer(cfg)
         model.load_state_dict(state_dict, strict=False)
         for param in model.parameters():
