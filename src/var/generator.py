@@ -18,7 +18,7 @@ class RollbackEvent(RuntimeError):
 class TurboQuantConfig:
     """Configuration for TurboQuant-inspired KV compression."""
 
-    key_bits: int = 3
+    key_bits: int = 4
     value_bits: int = 4
     qjl_residual_scale: float = 0.5
 

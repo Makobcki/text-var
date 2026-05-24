@@ -20,17 +20,11 @@ def _cross_entropy_per_token(
 ) -> torch.Tensor:
     if use_flash and _flash_cross_entropy_loss is not None and logits.is_cuda:
         losses, _ = _flash_cross_entropy_loss(logits, target)
-        if ignore_index is not None:
-            valid_tokens = target != ignore_index
-            losses = losses[valid_tokens]
         return losses
     flat_logits = logits.reshape(-1, logits.size(-1))
     flat_target = target.reshape(-1)
     ce_ignore_index = ignore_index if ignore_index is not None else -100
     losses = F.cross_entropy(flat_logits, flat_target, reduction="none", ignore_index=ce_ignore_index)
-    if ignore_index is not None:
-        valid_tokens = flat_target != ignore_index
-        losses = losses[valid_tokens]
     return losses
 
 
@@ -145,9 +139,13 @@ def multiscale_next_scale_cross_entropy(
                 ignore_index=ignore_index,
             )
 
+            valid_tokens = flat_target != ignore_index if ignore_index is not None else None
+            if valid_tokens is not None:
+                per_token = per_token[valid_tokens]
             if flat_mask is not None and flat_mask.any():
-                masked_part = per_token[flat_mask]
-                unmasked_part = per_token[~flat_mask]
+                effective_mask = flat_mask if valid_tokens is None else flat_mask[valid_tokens]
+                masked_part = per_token[effective_mask]
+                unmasked_part = per_token[~effective_mask]
                 if masked_part.numel() > 0 and unmasked_part.numel() > 0:
                     loss = masked_loss_weight * masked_part.mean() + (1.0 - masked_loss_weight) * unmasked_part.mean()
                 elif masked_part.numel() > 0:

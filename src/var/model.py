@@ -216,7 +216,8 @@ class SDPADecoderLayer(nn.Module):
                 v_scales=vs.transpose(1, 2).contiguous(),
                 k_qjl_signs=ksign.transpose(1, 2).contiguous(),
                 v_qjl_signs=vsign.transpose(1, 2).contiguous(),
-                bits=int(past_key_value.codec.cfg.key_bits),
+                key_bits=int(past_key_value.codec.cfg.key_bits),
+                value_bits=int(past_key_value.codec.cfg.value_bits),
                 qjl_residual_scale=float(past_key_value.codec.cfg.qjl_residual_scale),
             )
             present_key_value = (k[:, -1:, :, :], v[:, -1:, :, :])
@@ -324,7 +325,7 @@ class VARTransformer(nn.Module):
             return x
         shaped = x.view(x.shape[0], x.shape[1], num_heads, head_dim)
         cfg = TurboQuantConfig(
-            key_bits=int(turbo_cfg.get("key_bits", 3)),
+            key_bits=int(turbo_cfg.get("key_bits", 4)),
             value_bits=int(turbo_cfg.get("value_bits", 4)),
             qjl_residual_scale=float(turbo_cfg.get("qjl_residual_scale", 0.5)),
         )
@@ -478,7 +479,7 @@ class VARTransformer(nn.Module):
         if past_key_values is not None and len(past_key_values) > 0:
             first_past = past_key_values[0]
             if isinstance(first_past, RingKVCacheView):
-                past_len = int(first_past.positions.shape[0])
+                past_len = int(first_past.current_length)
             else:
                 past_len = int(first_past[0].shape[1])
         rotary_freqs_tgt = self.rotary_emb(x, target_len, start_pos=past_len)

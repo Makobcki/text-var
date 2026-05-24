@@ -36,7 +36,8 @@ class TurboQuantTritonInputs:
     v_scales: torch.Tensor
     k_qjl_signs: torch.Tensor | None = None
     v_qjl_signs: torch.Tensor | None = None
-    bits: int = 8
+    key_bits: int = 8
+    value_bits: int = 8
     qjl_residual_scale: float = 0.5
 
 
@@ -255,9 +256,11 @@ def _dequantize_kv(
     """
     if inputs.k_scales.numel() == 0 or inputs.v_scales.numel() == 0:
         return fallback_k.contiguous(), fallback_v.contiguous()
-    if inputs.bits not in _SUPPORTED_PACKED_BITS:
-        raise TurboQuantKernelError(f"Unsupported quantization bits: {inputs.bits}.")
-    if inputs.bits == 4 and (inputs.k_quant.shape[-1] * 2) == fallback_k.shape[-1]:
+    if inputs.key_bits not in _SUPPORTED_PACKED_BITS or inputs.value_bits not in _SUPPORTED_PACKED_BITS:
+        raise TurboQuantKernelError(f"Unsupported quantization bits: K={inputs.key_bits}, V={inputs.value_bits}.")
+    if inputs.key_bits != inputs.value_bits:
+        raise TurboQuantKernelError("Triton TurboQuant kernel requires symmetric K/V bit widths.")
+    if inputs.key_bits == 4 and (inputs.k_quant.shape[-1] * 2) == fallback_k.shape[-1]:
         kq = _unpack_4bit_tensor(inputs.k_quant, fallback_k.shape[-1])
         vq = _unpack_4bit_tensor(inputs.v_quant, fallback_v.shape[-1])
     else:
@@ -318,13 +321,15 @@ def _validate_inputs_for_kernel(
     Raises:
         TurboQuantKernelError: If shapes/bitness are inconsistent.
     """
-    if inputs.bits not in _SUPPORTED_PACKED_BITS:
-        raise TurboQuantKernelError(f"Unsupported quantization bits: {inputs.bits}.")
+    if inputs.key_bits not in _SUPPORTED_PACKED_BITS or inputs.value_bits not in _SUPPORTED_PACKED_BITS:
+        raise TurboQuantKernelError(f"Unsupported quantization bits: K={inputs.key_bits}, V={inputs.value_bits}.")
+    if inputs.key_bits != inputs.value_bits:
+        raise TurboQuantKernelError("Triton TurboQuant kernel requires symmetric K/V bit widths.")
     if inputs.q.ndim != 4 or fallback_k.ndim != 4 or fallback_v.ndim != 4:
         raise TurboQuantKernelError("Expected rank-4 q/fallback_k/fallback_v tensors.")
     if fallback_k.shape != fallback_v.shape:
         raise TurboQuantKernelError("fallback_k and fallback_v must have identical shapes.")
-    if inputs.bits == 4 and inputs.k_scales.numel() > 0:
+    if inputs.key_bits == 4 and inputs.k_scales.numel() > 0:
         expected_packed = (fallback_k.shape[-1] + 1) // 2
         if inputs.k_quant.shape[-1] != expected_packed or inputs.v_quant.shape[-1] != expected_packed:
             raise TurboQuantKernelError(
@@ -382,7 +387,9 @@ def _launch_turboquant_kernel(
     bsz, heads, seqlen_q, head_dim = q.shape
     if raw_inputs.k_scales.numel() == 0 or raw_inputs.v_scales.numel() == 0:
         return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
-    if raw_inputs.bits not in _SUPPORTED_PACKED_BITS:
+    if raw_inputs.key_bits not in _SUPPORTED_PACKED_BITS or raw_inputs.value_bits not in _SUPPORTED_PACKED_BITS:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
+    if raw_inputs.key_bits != raw_inputs.value_bits:
         return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
     if head_dim not in _SUPPORTED_HEAD_DIMS:
         return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
@@ -444,7 +451,7 @@ def _launch_turboquant_kernel(
         causal,
         raw_inputs.qjl_residual_scale,
         1.0 / (head_dim**0.5),
-        PACKED_BITS=raw_inputs.bits,
+        PACKED_BITS=raw_inputs.key_bits,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_D=head_dim,
