@@ -89,6 +89,48 @@ def test_phase2_finished_rows_are_padded(monkeypatch) -> None:
     assert int(lvl1[0, 1].item()) == int(model.cfg.pad_token_id)
 
 
+def test_hybrid_cascade_decode_retries_twice_after_rollback(monkeypatch) -> None:
+    model = _ToyModel(eos_token_id=2)
+    attempt_count = {"count": 0}
+
+    def _fake_decode_with_cache(**kwargs):
+        del kwargs
+        return (
+            torch.tensor([2]),
+            torch.zeros((1,), dtype=torch.float32),
+            torch.zeros((1,), dtype=torch.float32),
+            [],
+        )
+
+    def _fake_decode_no_cache(**kwargs):
+        del kwargs
+        return (
+            torch.tensor([1]),
+            torch.zeros((1,), dtype=torch.float32),
+            torch.zeros((1,), dtype=torch.float32),
+        )
+
+    def _fake_parallel_block_draft(**kwargs):
+        attempt_count["count"] += 1
+        threshold = kwargs.get("rollback_chaos_threshold", 0.5)
+        if threshold != float("inf"):
+            from src.var.generator import RollbackEvent
+
+            raise RollbackEvent(0, 16)
+        return torch.zeros((1, kwargs["len_lvl_2"]), dtype=torch.long)
+
+    monkeypatch.setattr("src.var.generator._decode_next_ar_token", _fake_decode_no_cache)
+    monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)
+    monkeypatch.setattr("src.var.generator._parallel_block_draft", _fake_parallel_block_draft)
+    monkeypatch.setattr(
+        "src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"]
+    )
+
+    output = hybrid_cascade_decode(model, batch_size=1, device=torch.device("cpu"))
+    assert attempt_count["count"] == 3
+    assert output[2].shape[0] == 1
+
+
 def test_encode_multiscale_appends_eos() -> None:
     from src.data.utils.prepare_dataset import _encode_multiscale
 

@@ -793,21 +793,39 @@ def hybrid_cascade_decode(
         )
     except RollbackEvent as event:
         print(f"[HYBRID] rollback block=[{event.block_start}, {event.block_end}) -> conservative resample")
-        lvl_2_draft = _parallel_block_draft(
-            model,
-            prefix_inputs=out,
-            len_lvl_2=len_lvl_2,
-            block_count=block_count,
-            block_size=block_size,
-            batch_size=batch,
-            device=device,
-            cfg_scale=cfg_scale,
-            alpha=max(0.25, alpha * 0.5),
-            healthy_entropy_limit=healthy_entropy_limit,
-            temperature=temperature,
-            top_p=top_p,
-            rollback_chaos_threshold=1.0,
-        )
+        try:
+            lvl_2_draft = _parallel_block_draft(
+                model,
+                prefix_inputs=out,
+                len_lvl_2=len_lvl_2,
+                block_count=block_count,
+                block_size=block_size,
+                batch_size=batch,
+                device=device,
+                cfg_scale=cfg_scale,
+                alpha=max(0.25, alpha * 0.5),
+                healthy_entropy_limit=healthy_entropy_limit,
+                temperature=temperature,
+                top_p=top_p,
+                rollback_chaos_threshold=1.0,
+            )
+        except RollbackEvent:
+            print("[HYBRID] conservative rollback repeated -> disabling rollback guard")
+            lvl_2_draft = _parallel_block_draft(
+                model,
+                prefix_inputs=out,
+                len_lvl_2=len_lvl_2,
+                block_count=block_count,
+                block_size=block_size,
+                batch_size=batch,
+                device=device,
+                cfg_scale=cfg_scale,
+                alpha=max(0.1, alpha * 0.25),
+                healthy_entropy_limit=healthy_entropy_limit,
+                temperature=temperature,
+                top_p=top_p,
+                rollback_chaos_threshold=float("inf"),
+            )
 
     print("[HYBRID] Фаза 3.2: Шовная склейка (latent inpainting)...")
     lvl_2_tokens = _inpaint_block_seams(
