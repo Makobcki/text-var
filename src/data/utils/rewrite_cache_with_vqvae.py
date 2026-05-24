@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import torch
+from safetensors.torch import load_file, save_file
 
 from src.data.token_cache import load_token_cache_metadata
 from src.vqvae.model import SemanticTextVQVAE
@@ -108,26 +109,25 @@ def rewrite_cache_with_vqvae(
         device=dev,
     )
 
-    chunk_paths = sorted(token_cache_dir.glob("tokens_chunk_*.pt"))
+    chunk_paths = sorted(token_cache_dir.glob("tokens_chunk_*.safetensors"))
     if not chunk_paths:
         raise ValueError(f"No chunk files found under: {token_cache_dir}")
 
     processed_entries = 0
     with torch.inference_mode():
         for chunk_path in chunk_paths:
-            payload = torch.load(chunk_path, map_location="cpu")
-            entries = payload.get("entries") if isinstance(payload, dict) else None
-            if not isinstance(entries, list):
-                raise ValueError(f"Chunk {chunk_path} has invalid 'entries' payload.")
+            payload = load_file(str(chunk_path), device="cpu")
+            source_level_key = f"tokens_level_{level_from}"
+            if source_level_key not in payload:
+                raise ValueError(f"Chunk {chunk_path} has no '{source_level_key}' tensor.")
 
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    raise ValueError(f"Chunk {chunk_path} contains non-dict entry.")
-                tokens = entry.get("tokens")
-                if not isinstance(tokens, list) or len(tokens) != len(metadata.level_lengths):
-                    raise ValueError(f"Chunk {chunk_path} entry contains invalid token levels.")
+            source_level_tokens = payload[source_level_key]
+            if source_level_tokens.ndim != 2:
+                raise ValueError(f"Chunk {chunk_path} has invalid '{source_level_key}' shape.")
 
-                source_tokens = torch.as_tensor(tokens[level_from], dtype=torch.long).unsqueeze(0).to(dev)
+            rewritten_target_rows: list[torch.Tensor] = []
+            for row_idx in range(source_level_tokens.shape[0]):
+                source_tokens = source_level_tokens[row_idx].to(dtype=torch.long, device=dev).unsqueeze(0)
                 semantic_idx, _ = model.encode_sentence(source_tokens, padding_mask=source_tokens.eq(0))
 
                 semantic_ids = semantic_idx.view(-1).to(dtype=torch.long, device="cpu")
@@ -138,10 +138,11 @@ def rewrite_cache_with_vqvae(
                         f"target level length ({expected_len})."
                     )
 
-                tokens[level_to] = semantic_ids
+                rewritten_target_rows.append(semantic_ids.to(dtype=torch.int32))
                 processed_entries += 1
 
-            torch.save(payload, chunk_path)
+            payload[f"tokens_level_{level_to}"] = torch.stack(rewritten_target_rows, dim=0).contiguous()
+            save_file(payload, str(chunk_path))
             LOGGER.debug("Rewritten chunk: %s", chunk_path)
 
     return processed_entries
