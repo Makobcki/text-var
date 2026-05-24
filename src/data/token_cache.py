@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from safetensors.torch import load_file
 from torch.utils.data import Dataset, IterableDataset
 
 
@@ -145,10 +146,38 @@ def load_token_entries_from_directory(
         raise ValueError(f"Token cache metadata file not found: {metadata_path}")
 
     metadata = load_token_cache_metadata(metadata_path)
-    chunk_paths = sorted(root.glob("tokens_chunk_*.pt"))
+    chunk_paths = sorted(root.glob("tokens_chunk_*.pt")) + sorted(root.glob("tokens_chunk_*.safetensors"))
     if not chunk_paths:
         raise ValueError(f"No token chunk files found in {root}")
     return chunk_paths, metadata
+
+
+def _iter_safetensors_entries(chunk_path: Path, metadata: TokenCacheMetadata):
+    payload = load_file(str(chunk_path), device="cpu")
+    ids = payload.get("ids")
+    if ids is None or ids.dim() != 1:
+        raise ValueError(f"Chunk {chunk_path} must contain a 1D ids tensor.")
+
+    level_tensors: list[torch.Tensor] = []
+    for level_idx, expected_length in enumerate(metadata.level_lengths):
+        level_tensor = payload.get(f"tokens_level_{level_idx}")
+        if level_tensor is None or level_tensor.dim() != 2:
+            raise ValueError(f"Chunk {chunk_path} missing tokens_level_{level_idx} tensor.")
+        if level_tensor.shape[0] != ids.shape[0] or level_tensor.shape[1] != expected_length:
+            raise ValueError(f"Chunk {chunk_path} has invalid shape for tokens_level_{level_idx}.")
+        level_tensors.append(level_tensor)
+
+    for row_idx in range(ids.shape[0]):
+        out = [torch.as_tensor(level_tensor[row_idx], dtype=torch.long) for level_tensor in level_tensors]
+        for lvl_idx, vocab_size in enumerate(metadata.level_vocab_sizes):
+            item = out[lvl_idx]
+            if item.numel() and (int(item.max().item()) >= vocab_size or int(item.min().item()) < 0):
+                raise ValueError("Token value outside tokenizer codebook.")
+        yield {
+            "id": str(int(ids[row_idx].item())),
+            "tokens": out,
+            "metadata": metadata,
+        }
 
 
 class MultiscaleTokenChunkIterableDataset(IterableDataset):
@@ -158,6 +187,9 @@ class MultiscaleTokenChunkIterableDataset(IterableDataset):
 
     def __iter__(self):
         for chunk_path in self.chunk_paths:
+            if chunk_path.suffix == ".safetensors":
+                yield from _iter_safetensors_entries(chunk_path, self.metadata)
+                continue
             payload = torch.load(chunk_path, map_location="cpu")
             entries = payload.get("entries") if isinstance(payload, dict) else None
             if not isinstance(entries, list):
