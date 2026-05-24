@@ -63,6 +63,99 @@ def configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=level, format=fmt)
 
 
+def _get_required_field(record: dict[str, object], field_names: Sequence[str], line_number: int) -> str:
+    """Get a required string field from a dataset record.
+
+    Args:
+        record: Parsed JSON object for one dataset line.
+        field_names: Ordered candidate keys to resolve.
+        line_number: One-based source line number for error context.
+
+    Returns:
+        Resolved field as string.
+
+    Raises:
+        ValueError: If none of the candidate keys are present.
+    """
+    for field_name in field_names:
+        if field_name in record:
+            return str(record[field_name])
+    raise ValueError(f"Missing required field(s) {field_names} at dataset line {line_number}")
+
+
+def _normalize_test_code(test_payload: object) -> str:
+    """Normalize test payload into executable Python test code.
+
+    Args:
+        test_payload: Raw test payload from dataset record.
+
+    Returns:
+        Python source code containing tests.
+
+    Raises:
+        ValueError: If no test code could be extracted.
+    """
+    if isinstance(test_payload, str):
+        return test_payload
+    if isinstance(test_payload, list):
+        normalized_lines = [str(line) for line in test_payload if str(line).strip()]
+        if not normalized_lines:
+            raise ValueError("Test payload list is empty")
+        return "\n".join(normalized_lines)
+    raise ValueError(f"Unsupported test payload type: {type(test_payload).__name__}")
+
+
+def _extract_entry_point_from_prompt(prompt: str) -> str | None:
+    """Extract function entry point from prompt text.
+
+    Args:
+        prompt: Prompt source that may contain a Python function definition.
+
+    Returns:
+        Function name when found, otherwise None.
+    """
+    match = re.search(r"def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", prompt)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _build_problem(record: dict[str, object], line_number: int) -> BenchmarkProblem:
+    """Build a benchmark problem from a raw dataset record.
+
+    Args:
+        record: Parsed JSON object for one dataset line.
+        line_number: One-based source line number for error context.
+
+    Returns:
+        Normalized benchmark problem.
+
+    Raises:
+        ValueError: If required fields are missing or malformed.
+    """
+    prompt = _get_required_field(record, ["prompt", "text", "question"], line_number)
+    task_id: str
+    if any(key in record for key in ("task_id", "id", "problem_id", "name")):
+        task_id = _get_required_field(record, ["task_id", "id", "problem_id", "name"], line_number)
+    else:
+        task_id = f"line_{line_number}"
+
+    test_payload = next((record[key] for key in ("test", "test_code", "test_list", "tests") if key in record), None)
+    if test_payload is None:
+        raise ValueError(f"Missing required test field at dataset line {line_number}")
+    test_code = _normalize_test_code(test_payload)
+
+    if any(key in record for key in ("entry_point", "function_name", "fn_name")):
+        entry_point = _get_required_field(record, ["entry_point", "function_name", "fn_name"], line_number)
+    else:
+        inferred_entry_point = _extract_entry_point_from_prompt(prompt)
+        if inferred_entry_point is None:
+            raise ValueError(f"Missing entry point and could not infer from prompt at dataset line {line_number}")
+        entry_point = inferred_entry_point
+
+    return BenchmarkProblem(task_id=task_id, prompt=prompt, test_code=test_code, entry_point=entry_point)
+
+
 def load_jsonl_problems(dataset_path: Path) -> list[BenchmarkProblem]:
     """Load HumanEval/MBPP-style tasks from JSONL.
 
@@ -71,19 +164,15 @@ def load_jsonl_problems(dataset_path: Path) -> list[BenchmarkProblem]:
 
     Returns:
         Parsed benchmark problems.
+
+    Raises:
+        ValueError: If a record misses required schema fields.
     """
     problems: list[BenchmarkProblem] = []
     with dataset_path.open("r", encoding="utf-8") as file:
-        for line in file:
+        for line_number, line in enumerate(file, start=1):
             raw = json.loads(line)
-            problems.append(
-                BenchmarkProblem(
-                    task_id=str(raw["task_id"]),
-                    prompt=str(raw["prompt"]),
-                    test_code=str(raw["test"]),
-                    entry_point=str(raw["entry_point"]),
-                )
-            )
+            problems.append(_build_problem(raw, line_number))
     return problems
 
 
