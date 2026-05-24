@@ -255,3 +255,90 @@ def test_parallel_block_draft_raises_rollback_on_high_chaos(monkeypatch) -> None
         assert exc.block_end == 2
     else:
         raise AssertionError("Expected RollbackEvent when chaos_diff exceeds threshold")
+
+
+def test_load_var_requires_model_config(monkeypatch, tmp_path: Path) -> None:
+    var_path = tmp_path / "var.pt"
+    var_path.write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.core.pipeline.torch.load",
+        lambda path, map_location, weights_only: {"model": {"w": torch.tensor(1)}},
+    )
+
+    try:
+        _ = TextVARPipeline._load_var(TextVARPipeline.__new__(TextVARPipeline), var_path)
+    except ValueError as exc:
+        assert "model_config is required" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError when model_config is missing")
+
+
+def test_load_vqvae_requires_model_config(monkeypatch, tmp_path: Path) -> None:
+    vq_path = tmp_path / "vqvae.pt"
+    vq_path.write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.core.pipeline.torch.load",
+        lambda path, map_location, weights_only: {"model": {"w": torch.tensor(1)}},
+    )
+
+    try:
+        _ = TextVARPipeline._load_vqvae(TextVARPipeline.__new__(TextVARPipeline), vq_path)
+    except ValueError as exc:
+        assert "model_config is required" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError when metadata is missing")
+
+
+def test_load_vqvae_uses_model_config(monkeypatch, tmp_path: Path) -> None:
+    vq_path = tmp_path / "vqvae.pt"
+    vq_path.write_text("x", encoding="utf-8")
+    captured: dict[str, int] = {}
+
+    class _FakeVQVAE(torch.nn.Module):
+        def __init__(
+            self,
+            vocab_size: int = 32000,
+            hidden_size: int = 1024,
+            num_semantic_tokens: int = 4096,
+            semantic_sequence_length: int = 1,
+            pad_token_id: int = 0,
+        ):
+            super().__init__()
+            captured["vocab_size"] = int(vocab_size)
+            captured["hidden_size"] = int(hidden_size)
+            captured["num_semantic_tokens"] = int(num_semantic_tokens)
+            captured["semantic_sequence_length"] = int(semantic_sequence_length)
+            captured["pad_token_id"] = int(pad_token_id)
+
+        def load_state_dict(self, state_dict, strict=False):
+            del state_dict, strict
+            return self
+
+        def parameters(self):
+            return []
+
+    monkeypatch.setattr("src.core.pipeline.SemanticTextVQVAE", _FakeVQVAE)
+    monkeypatch.setattr(
+        "src.core.pipeline.torch.load",
+        lambda path, map_location, weights_only: {
+            "model": {"w": torch.tensor(1)},
+            "model_config": {
+                "vocab_size": 97,
+                "hidden_size": 48,
+                "num_semantic_tokens": 123,
+                "semantic_sequence_length": 7,
+                "pad_token_id": 5,
+            },
+        },
+    )
+
+    _ = TextVARPipeline._load_vqvae(TextVARPipeline.__new__(TextVARPipeline), vq_path)
+    assert captured == {
+        "vocab_size": 97,
+        "hidden_size": 48,
+        "num_semantic_tokens": 123,
+        "semantic_sequence_length": 7,
+        "pad_token_id": 5,
+    }
