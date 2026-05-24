@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from math import ceil
 
 
 class VectorQuantizer(nn.Module):
@@ -92,6 +93,34 @@ class SemanticTextVQVAE(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
 
+    def _pool_semantic_tokens(self, encoded: torch.Tensor) -> torch.Tensor:
+        """Downsample encoder states to semantic token sequence length.
+
+        Uses local average pooling with stride to preserve token-level locality
+        before optional adaptive resampling to the configured semantic length.
+
+        Args:
+            encoded: Encoder output tensor with shape ``(B, T, H)``.
+
+        Returns:
+            Semantic feature tensor with shape ``(B, S, H)`` where
+            ``S == self.semantic_sequence_length``.
+        """
+        source_len = int(encoded.shape[1])
+        target_len = int(self.semantic_sequence_length)
+        if source_len <= 0:
+            raise ValueError("Encoded sequence length must be positive.")
+        stride = max(1, ceil(source_len / target_len))
+        pooled = F.avg_pool1d(
+            encoded.transpose(1, 2),
+            kernel_size=stride,
+            stride=stride,
+            ceil_mode=True,
+        ).transpose(1, 2)
+        if int(pooled.shape[1]) == target_len:
+            return pooled
+        return F.adaptive_avg_pool1d(pooled.transpose(1, 2), target_len).transpose(1, 2)
+
     def _resolve_padding_mask(
         self,
         bpe_tokens: torch.Tensor,
@@ -109,10 +138,7 @@ class SemanticTextVQVAE(nn.Module):
         x = self.embedding(bpe_tokens)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        semantic_inputs = F.adaptive_avg_pool1d(
-            encoded.transpose(1, 2),
-            self.semantic_sequence_length,
-        ).transpose(1, 2)
+        semantic_inputs = self._pool_semantic_tokens(encoded)
         _, vq_loss, semantic_idx = self.quantizer(semantic_inputs)
         return semantic_idx, vq_loss
 
@@ -180,10 +206,7 @@ class SemanticTextVQVAE(nn.Module):
         x = self.embedding(bpe_tokens)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        semantic_inputs = F.adaptive_avg_pool1d(
-            encoded.transpose(1, 2),
-            self.semantic_sequence_length,
-        ).transpose(1, 2)
+        semantic_inputs = self._pool_semantic_tokens(encoded)
 
         # --- 2. ЭТАП КВАНТОВАНИЯ ---
         quantized, vq_loss, semantic_idx = self.quantizer(semantic_inputs)

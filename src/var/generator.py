@@ -630,14 +630,15 @@ def hybrid_cascade_decode(
         chunk_start = lvl_1_sequence.shape[1]
         chunk_end = min(len_lvl_1, chunk_start + chunk_size)
         for _ in range(chunk_start, chunk_end):
+            is_active = ~finished
             token_input = (
                 torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=device)
                 if lvl_1_sequence.shape[1] == 0
                 else lvl_1_sequence[:, -1:].contiguous()
             )
-            if bool(torch.any(finished).item()):
+            if bool(torch.any(~is_active).item()):
                 token_input = token_input.clone()
-                token_input[finished] = int(model.cfg.pad_token_id)
+                token_input[~is_active] = int(model.cfg.pad_token_id)
             next_token, _, _, past_key_values = _decode_next_ar_token_with_cache(
                 model,
                 prefix_inputs=[global_level_0_memory],
@@ -651,9 +652,9 @@ def hybrid_cascade_decode(
                 past_key_values=past_key_values,
                 cache_ring_buffer=cache_ring_buffer,
             )
-            if bool(torch.any(finished).item()):
+            if bool(torch.any(~is_active).item()):
                 next_token = torch.where(
-                    finished,
+                    ~is_active,
                     torch.full_like(next_token, int(model.cfg.pad_token_id)),
                     next_token,
                 )
