@@ -33,3 +33,18 @@ def test_thermodynamic_sampling_accepts_column_vector_sampling_arguments() -> No
     assert sampled.shape == (2,)
     assert entropy.shape == (2,)
     assert chaos.shape == (2,)
+
+
+def test_thermodynamic_sampling_accepts_singleton_tensor_sampling_arguments() -> None:
+    torch.manual_seed(0)
+    logits = torch.tensor([[8.0, 7.9, 1.0], [8.0, 7.9, 1.0]], dtype=torch.float32)
+
+    sampled, entropy, chaos = thermodynamic_sampling_with_stats(
+        logits,
+        temperature=torch.tensor([0.4], dtype=torch.float32),
+        top_p=torch.tensor([1.0], dtype=torch.float32),
+    )
+
+    assert sampled.shape == (2,)
+    assert entropy.shape == (2,)
+    assert chaos.shape == (2,)

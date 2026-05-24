@@ -331,6 +331,8 @@ def _to_batch_vector(
     if isinstance(value, torch.Tensor):
         if value.ndim == 0:
             return value.to(device=device, dtype=dtype).repeat(batch_size)
+        if value.numel() == 1:
+            return value.reshape(1).to(device=device, dtype=dtype).repeat(batch_size)
         if value.numel() == batch_size:
             return value.reshape(batch_size).to(device=device, dtype=dtype)
         if value.ndim != 1 or value.shape[0] != batch_size:
