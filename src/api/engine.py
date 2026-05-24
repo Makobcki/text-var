@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
 
 from src.core.pipeline import TextVARPipeline
 
@@ -79,14 +78,13 @@ class TextVAREngine:
         Returns:
             Generated text preserving the original request ordering.
         """
-        grouped: Dict[int, List[Tuple[int, GenerationParams]]] = {}
+        grouped: dict[bool, list[tuple[int, GenerationParams]]] = {}
         for index, params in enumerate(params_list):
-            key = (params.max_tokens, params.turboquant_kv)
-            grouped.setdefault(key, []).append((index, params))
+            grouped.setdefault(params.turboquant_kv, []).append((index, params))
 
         results: list[str] = [""] * len(params_list)
-        for group_key, grouped_items in grouped.items():
-            max_tokens, turboquant_kv = group_key
+        for turboquant_kv, grouped_items in grouped.items():
+            max_tokens = max(item.max_tokens for _, item in grouped_items)
             prompts = [item.prompt for _, item in grouped_items]
             temperatures = [item.temperature for _, item in grouped_items]
             top_ps = [item.top_p for _, item in grouped_items]
