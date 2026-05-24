@@ -175,6 +175,7 @@ class SDPADecoderLayer(nn.Module):
         *,
         tgt: torch.Tensor,
         memory: torch.Tensor,
+        cross_kv_memory: tuple[torch.Tensor, torch.Tensor] | None = None,
         self_attn_mask: torch.Tensor | None = None,
         self_is_causal: bool = False,
         rotary_freqs_tgt: torch.Tensor | None = None,
@@ -245,8 +246,11 @@ class SDPADecoderLayer(nn.Module):
 
         x2 = self.norm2(x)
         cq = self.cross_q(x2)
-        ckv = self.cross_kv(memory)
-        ck, cv = ckv.chunk(2, dim=-1)
+        if cross_kv_memory is None:
+            ckv = self.cross_kv(memory)
+            ck, cv = ckv.chunk(2, dim=-1)
+        else:
+            ck, cv = cross_kv_memory
         cqh, ckh, cvh = self._shape_heads(cq), self._shape_heads(ck), self._shape_heads(cv)
         cross_attn = F.scaled_dot_product_attention(
             cqh,
@@ -466,6 +470,10 @@ class VARTransformer(nn.Module):
 
         final_memory = torch.cat([null_mem, last_scale_memory], dim=1) if target_idx > 0 else null_mem
         final_memory = self._maybe_turboquant_memory(final_memory)
+        projected_final_memory = [
+            tuple(block.cross_kv(final_memory).chunk(2, dim=-1))
+            for block in self.blocks
+        ]
 
         if current_level_input is not None:
             x = self.token_embeddings[target_idx](current_level_input)
@@ -508,6 +516,7 @@ class VARTransformer(nn.Module):
                     self_is_causal=self_is_causal,
                     rotary_freqs_tgt=rotary_freqs_tgt,
                     past_key_value=layer_past,
+                    cross_kv_memory=projected_final_memory[layer_idx],
                 )
             else:
                 x, present = block(
@@ -517,6 +526,7 @@ class VARTransformer(nn.Module):
                     self_is_causal=self_is_causal,
                     rotary_freqs_tgt=rotary_freqs_tgt,
                     past_key_value=layer_past,
+                    cross_kv_memory=projected_final_memory[layer_idx],
                 )
             if use_cache:
                 present_key_values.append(present)

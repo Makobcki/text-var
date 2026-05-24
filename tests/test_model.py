@@ -19,8 +19,9 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         self_is_causal: bool = False,
         rotary_freqs_tgt: torch.Tensor | None = None,
         past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cross_kv_memory: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        del memory, rotary_freqs_tgt
+        del memory, rotary_freqs_tgt, cross_kv_memory
         self.masks.append(self_attn_mask)
         self.causal_flags.append(self_is_causal)
         if past_key_value is None:
