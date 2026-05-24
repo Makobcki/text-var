@@ -7,9 +7,9 @@ from typing import Any
 import torch
 from transformers import PreTrainedTokenizerFast
 
-from src.var.training.config import VARConfig
 from src.var.generator import hybrid_cascade_decode
 from src.var.model import VARTransformer
+from src.var.training.config import VARConfig
 from src.vqvae.model import SemanticTextVQVAE
 
 
@@ -80,14 +80,19 @@ class TextVARPipeline:
             Decoded text string.
         """
 
-        generated_texts = self.generate_batch(
-            [prompt],
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
+        generated_levels = hybrid_cascade_decode(
+            self._var_model,
+            batch_size=bpe_tokens.shape[0],
+            device=self._device,
+            prefix_inputs=[semantic_prefix],
+            temperature=sampling_temperatures,
+            top_p=sampling_top_ps,
             turboquant_kv=turboquant_kv,
         )
-        return generated_texts[0]
+
+        # Берем последний уровень (Уровень 2), который содержит токены из словаря 50257
+        bpe_output_tokens = generated_levels[-1]
+        return self._tokenizer.batch_decode(bpe_output_tokens.tolist(), skip_special_tokens=True)
 
     @torch.no_grad()
     def generate_batch(
@@ -209,7 +214,9 @@ class TextVARPipeline:
             raise FileNotFoundError(f"VQ-VAE checkpoint not found: {path}")
 
         payload = torch.load(path, map_location="cpu", weights_only=False)
-        state_dict: dict[str, Any] = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+        state_dict: dict[str, Any] = (
+            payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+        )
 
         if not isinstance(payload, dict):
             raise ValueError("VQ-VAE checkpoint payload must be a dictionary.")
@@ -225,7 +232,9 @@ class TextVARPipeline:
         )
         for field_name in required_fields:
             if field_name not in model_config:
-                raise ValueError(f"VQ-VAE checkpoint model_config.{field_name} is required for loading.")
+                raise ValueError(
+                    f"VQ-VAE checkpoint model_config.{field_name} is required for loading."
+                )
         model = SemanticTextVQVAE(
             vocab_size=int(model_config["vocab_size"]),
             hidden_size=int(model_config["hidden_size"]),
@@ -255,7 +264,9 @@ class TextVARPipeline:
             raise FileNotFoundError(f"VAR checkpoint not found: {path}")
 
         payload = torch.load(path, map_location="cpu", weights_only=False)
-        state_dict: dict[str, Any] = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+        state_dict: dict[str, Any] = (
+            payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+        )
 
         if not isinstance(payload, dict):
             raise ValueError("VAR checkpoint payload must be a dictionary.")

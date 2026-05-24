@@ -55,7 +55,12 @@ def run_training(
         vocab_size = level_vocab_size
 
     dev = torch.device("cuda" if device == "cuda" and torch.cuda.is_available() else "cpu")
-    model = SemanticTextVQVAE(vocab_size=vocab_size, hidden_size=hidden_size, num_semantic_tokens=semantic_tokens).to(dev)
+    model = SemanticTextVQVAE(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        num_semantic_tokens=semantic_tokens,
+        semantic_sequence_length=64,  # <--- КРИТИЧЕСКИ ВАЖНО
+    ).to(dev)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     ds = MultiscaleTokenChunkIterableDataset(chunk_paths=chunk_paths, metadata=metadata)
@@ -99,7 +104,8 @@ def run_training(
             if step >= steps:
                 break
 
-    save_vqvae_checkpoint({
+    save_vqvae_checkpoint(
+        {
             "model": model.state_dict(),
             "steps": step,
             "model_config": {
@@ -118,7 +124,9 @@ def run_training(
             ).to_dict(),
             "source_token_cache": str(token_cache_dir),
             "level_index": int(level_index),
-        }, output_path)
+        },
+        output_path,
+    )
     print(f"[VQVAE] checkpoint saved: {output_path}")
     return output_path
 
