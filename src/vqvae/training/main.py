@@ -1,8 +1,10 @@
 from pathlib import Path
+import time
 
 import torch
 from torch.utils.data import DataLoader
 
+from src.core.training_logger import StepTiming, TrainingStepLogger
 from src.data.token_cache import (
     MultiscaleTokenChunkIterableDataset,
     TokenCacheMetadata,
@@ -67,6 +69,7 @@ def run_training(
     loader = DataLoader(ds, batch_size=batch_size, collate_fn=_collate_level(level_index))
 
     model.train()
+    step_logger = TrainingStepLogger("vqvae", steps)
     step = 0
     micro_step = 0
     optimizer.zero_grad(set_to_none=True)
@@ -74,18 +77,40 @@ def run_training(
         did_progress = False
         for tokens, padding_mask in loader:
             did_progress = True
+            step_start = time.perf_counter()
+            transfer_start = time.perf_counter()
             tokens = tokens.to(dev, non_blocking=True)
             padding_mask = padding_mask.to(dev, non_blocking=True)
+            transfer_time = time.perf_counter() - transfer_start
+            forward_start = time.perf_counter()
             _, loss = model(tokens, padding_mask=padding_mask)
+            forward_time = time.perf_counter() - forward_start
             scaled_loss = loss / gradient_accumulation_steps
+            backward_start = time.perf_counter()
             scaled_loss.backward()
+            backward_time = time.perf_counter() - backward_start
             micro_step += 1
             if micro_step % gradient_accumulation_steps == 0:
+                optimizer_start = time.perf_counter()
                 optimizer.step()
+                optimizer_time = time.perf_counter() - optimizer_start
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
-                if step % 20 == 0:
-                    print(f"[VQVAE] step={step}/{steps} loss={float(loss.detach().cpu()):.6f}")
+                print(
+                    step_logger.build_line(
+                        step=step,
+                        loss=float(loss.detach().cpu()),
+                        timing=StepTiming(
+                            total=time.perf_counter() - step_start,
+                            stages={
+                                "transfer": transfer_time,
+                                "forward": forward_time,
+                                "backward": backward_time,
+                                "optimizer": optimizer_time,
+                            },
+                        ),
+                    )
+                )
             if step >= steps:
                 break
 
@@ -96,11 +121,26 @@ def run_training(
             break
 
         if micro_step % gradient_accumulation_steps != 0:
+            optimizer_start = time.perf_counter()
             optimizer.step()
+            optimizer_time = time.perf_counter() - optimizer_start
             optimizer.zero_grad(set_to_none=True)
             step += 1
-            if step % 20 == 0:
-                print(f"[VQVAE] step={step}/{steps} loss={float(loss.detach().cpu()):.6f}")
+            print(
+                step_logger.build_line(
+                    step=step,
+                    loss=float(loss.detach().cpu()),
+                    timing=StepTiming(
+                        total=time.perf_counter() - step_start,
+                        stages={
+                            "transfer": transfer_time,
+                            "forward": forward_time,
+                            "backward": backward_time,
+                            "optimizer": optimizer_time,
+                        },
+                    ),
+                )
+            )
             if step >= steps:
                 break
 
