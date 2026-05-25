@@ -13,7 +13,7 @@ from src.data.token_cache import (
 from src.vqvae.checkpoint import save_vqvae_checkpoint
 from src.vqvae.model import SemanticTextVQVAE
 from src.vqvae.training.cli import build_parser
-from src.vqvae.training.config import VQVAETrainConfig
+from src.vqvae.training.config import VQVAETrainConfig, load_vqvae_train_config
 
 
 def _collate_level(level_index: int):
@@ -34,7 +34,10 @@ def run_training(
     batch_size: int = 8,
     vocab_size: int = 32000,
     hidden_size: int = 1024,
-    semantic_tokens: int = 4096,
+    num_semantic_tokens: int = 4096,
+    semantic_sequence_length: int = 1,
+    pad_token_id: int = 0,
+    max_position_embeddings: int = 2048,
     lr: float = 3e-4,
     device: str = "cuda",
     level_index: int = 2,
@@ -60,8 +63,10 @@ def run_training(
     model = SemanticTextVQVAE(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
-        num_semantic_tokens=semantic_tokens,
-        semantic_sequence_length=64,  # <--- КРИТИЧЕСКИ ВАЖНО
+        num_semantic_tokens=num_semantic_tokens,
+        semantic_sequence_length=semantic_sequence_length,
+        pad_token_id=pad_token_id,
+        max_position_embeddings=max_position_embeddings,
     ).to(dev)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
@@ -175,19 +180,27 @@ def main() -> None:
     """Run VQ-VAE training from CLI options."""
     parser = build_parser()
     args = parser.parse_args()
-    cfg = VQVAETrainConfig(
-        output=Path(args.output),
-        token_cache_dir=Path(args.token_cache_dir),
-        steps=args.steps,
-        batch_size=args.batch_size,
-        device=args.device,
-        vocab_size=args.vocab_size,
-        hidden_size=args.hidden_size,
-        semantic_tokens=args.semantic_tokens,
-        lr=args.lr,
-        level_index=args.level_index,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-    )
+    if args.config:
+        cfg = load_vqvae_train_config(Path(args.config))
+    else:
+        if not args.output or not args.token_cache_dir:
+            parser.error('--output and --token-cache-dir are required when --config is not provided')
+        cfg = VQVAETrainConfig(
+            output=Path(args.output),
+            token_cache_dir=Path(args.token_cache_dir),
+            steps=args.steps,
+            batch_size=args.batch_size,
+            device=args.device,
+            vocab_size=args.vocab_size,
+            hidden_size=args.hidden_size,
+            num_semantic_tokens=args.num_semantic_tokens,
+            semantic_sequence_length=args.semantic_sequence_length,
+            pad_token_id=args.pad_token_id,
+            max_position_embeddings=args.max_position_embeddings,
+            lr=args.lr,
+            level_index=args.level_index,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+        )
     run_training(
         cfg.output,
         cfg.token_cache_dir,
@@ -195,7 +208,10 @@ def main() -> None:
         batch_size=cfg.batch_size,
         vocab_size=cfg.vocab_size,
         hidden_size=cfg.hidden_size,
-        semantic_tokens=cfg.semantic_tokens,
+        num_semantic_tokens=cfg.num_semantic_tokens,
+        semantic_sequence_length=cfg.semantic_sequence_length,
+        pad_token_id=cfg.pad_token_id,
+        max_position_embeddings=cfg.max_position_embeddings,
         lr=cfg.lr,
         device=cfg.device,
         level_index=cfg.level_index,

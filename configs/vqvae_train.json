@@ -1,0 +1,16 @@
+{
+  "output": "checkpoints/vqvae.pt",
+  "token_cache_dir": "token_cache",
+  "steps": 500,
+  "batch_size": 8,
+  "device": "cuda",
+  "vocab_size": 32000,
+  "hidden_size": 1024,
+  "num_semantic_tokens": 4096,
+  "semantic_sequence_length": 1,
+  "pad_token_id": 0,
+  "max_position_embeddings": 2048,
+  "lr": 0.0003,
+  "level_index": 2,
+  "gradient_accumulation_steps": 1
+}
