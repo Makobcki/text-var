@@ -391,47 +391,30 @@ class VARTransformer(nn.Module):
         )
         return out
 
-    def forward(
+    def _encode_prefix_memories(
         self,
         prefix_inputs: list[torch.Tensor],
         *,
-        target_level: int | None = None,
-        current_level_input: torch.Tensor | None = None,
-        batch_size: int | None = None,
-        cfg_scale: float = 1.0,
-        return_early_outputs: bool = False,
-        compact_memory_for_final_level: bool = True,
-        past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None = None,
-        use_cache: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
-        if cfg_scale != 1.0 and prefix_inputs:
-            out_cond = self.forward(prefix_inputs, target_level=target_level, current_level_input=current_level_input, batch_size=batch_size, cfg_scale=1.0, return_early_outputs=return_early_outputs, compact_memory_for_final_level=compact_memory_for_final_level)
-            uncond_prefixes = [torch.zeros_like(p) for p in prefix_inputs]
-            out_uncond = self.forward(uncond_prefixes, target_level=target_level, current_level_input=current_level_input, batch_size=batch_size, cfg_scale=1.0, return_early_outputs=return_early_outputs, compact_memory_for_final_level=compact_memory_for_final_level)
-            if return_early_outputs:
-                logits_cond, early_cond = out_cond
-                logits_uncond, early_uncond = out_uncond
-                final_logits = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
-                final_early = [u + cfg_scale * (c - u) for c, u in zip(early_cond, early_uncond)]
-                return final_logits, final_early
-            return out_uncond + cfg_scale * (out_cond - out_uncond)
+        batch_size: int,
+        compact_memory_for_final_level: bool,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Encode all prefix levels once and build per-target memories.
 
-        if prefix_inputs:
-            b = prefix_inputs[0].shape[0]
-        elif current_level_input is not None:
-            b = current_level_input.shape[0]
-        else:
-            b = batch_size if batch_size else 1
+        Args:
+            prefix_inputs: Hierarchical prefix tokens for each level.
+            batch_size: Batch size used when there are no prefix levels.
+            compact_memory_for_final_level: Whether to compress memory to the prior level length.
 
-        target_idx = target_level if target_level is not None else len(prefix_inputs)
-
+        Returns:
+            Tuple of null memory tensor and per-target final memories.
+        """
+        b = prefix_inputs[0].shape[0] if prefix_inputs else batch_size
         null_mem = self.null_token_embedding.weight.unsqueeze(0).expand(b, 1, -1)
         current_context = null_mem
         last_scale_memory = null_mem
+        memories_by_target: list[torch.Tensor] = [null_mem]
 
         for s_idx, scale_input in enumerate(prefix_inputs):
-            if s_idx >= target_idx:
-                break
             self._validate_token_ids(scale_input, level_idx=s_idx, source=f"prefix_inputs[{s_idx}]")
             emb = self.token_embeddings[s_idx](scale_input)
             emb = emb + self.scale_embedding.weight[s_idx].view(1, 1, -1)
@@ -443,8 +426,6 @@ class VARTransformer(nn.Module):
             local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
             for block in self.blocks:
                 if local_radius > 0 and seq_len > 1:
-                    # Keep config option for compatibility, but avoid dense custom masks
-                    # that disable FlashAttention kernels in SDPA.
                     x_scale = self._run_prefix_block_causal(
                         block=block,
                         x_scale=x_scale,
@@ -477,9 +458,52 @@ class VARTransformer(nn.Module):
             compressed = self._compress_memory(encoded, target_tokens=compress_tokens)
             last_scale_memory = compressed
             current_context = self._maybe_turboquant_memory(torch.cat([null_mem, compressed], dim=1))
+            memories_by_target.append(self._maybe_turboquant_memory(torch.cat([null_mem, last_scale_memory], dim=1)))
+        return null_mem, memories_by_target
 
-        final_memory = torch.cat([null_mem, last_scale_memory], dim=1) if target_idx > 0 else null_mem
-        final_memory = self._maybe_turboquant_memory(final_memory)
+    def forward(
+        self,
+        prefix_inputs: list[torch.Tensor],
+        *,
+        target_level: int | None = None,
+        current_level_input: torch.Tensor | None = None,
+        batch_size: int | None = None,
+        cfg_scale: float = 1.0,
+        return_early_outputs: bool = False,
+        compact_memory_for_final_level: bool = True,
+        precomputed_final_memory: torch.Tensor | None = None,
+        past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None = None,
+        use_cache: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+        if cfg_scale != 1.0 and prefix_inputs:
+            out_cond = self.forward(prefix_inputs, target_level=target_level, current_level_input=current_level_input, batch_size=batch_size, cfg_scale=1.0, return_early_outputs=return_early_outputs, compact_memory_for_final_level=compact_memory_for_final_level)
+            uncond_prefixes = [torch.zeros_like(p) for p in prefix_inputs]
+            out_uncond = self.forward(uncond_prefixes, target_level=target_level, current_level_input=current_level_input, batch_size=batch_size, cfg_scale=1.0, return_early_outputs=return_early_outputs, compact_memory_for_final_level=compact_memory_for_final_level)
+            if return_early_outputs:
+                logits_cond, early_cond = out_cond
+                logits_uncond, early_uncond = out_uncond
+                final_logits = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
+                final_early = [u + cfg_scale * (c - u) for c, u in zip(early_cond, early_uncond)]
+                return final_logits, final_early
+            return out_uncond + cfg_scale * (out_cond - out_uncond)
+
+        if prefix_inputs:
+            b = prefix_inputs[0].shape[0]
+        elif current_level_input is not None:
+            b = current_level_input.shape[0]
+        else:
+            b = batch_size if batch_size else 1
+
+        target_idx = target_level if target_level is not None else len(prefix_inputs)
+        if precomputed_final_memory is None:
+            _, memories_by_target = self._encode_prefix_memories(
+                prefix_inputs[:target_idx],
+                batch_size=b,
+                compact_memory_for_final_level=compact_memory_for_final_level,
+            )
+            final_memory = memories_by_target[target_idx]
+        else:
+            final_memory = precomputed_final_memory
         projected_final_memory = [
             tuple(block.cross_kv(final_memory).chunk(2, dim=-1))
             for block in self.blocks

@@ -13,6 +13,7 @@ def test_unconditional_prefix_dropout_zeros_only_prefix_levels() -> None:
     assert torch.equal(dropped[0], torch.zeros_like(level0))
     assert torch.equal(dropped[1], torch.zeros_like(level1))
     assert torch.equal(dropped[2], target)
+    assert dropped[2] is target
 
 
 def test_unconditional_prefix_dropout_keeps_tokens_when_disabled() -> None:

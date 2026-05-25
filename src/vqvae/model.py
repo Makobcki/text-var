@@ -57,6 +57,36 @@ class VectorQuantizer(nn.Module):
             distances.append(chunk_distances)
         return torch.cat(distances, dim=0)
 
+    def _compute_distances_chunked(
+        self,
+        flat_inputs: torch.Tensor,
+        *,
+        chunk_size: int = 1024,
+    ) -> torch.Tensor:
+        """Compute pairwise Euclidean distances to codebook with bounded peak memory.
+
+        Args:
+            flat_inputs: Flattened input tensor with shape ``(N, D)``.
+            chunk_size: Number of rows processed per chunk.
+
+        Returns:
+            Distance tensor with shape ``(N, num_embeddings)``.
+
+        Raises:
+            ValueError: If ``chunk_size`` is smaller than 1.
+        """
+        if int(chunk_size) < 1:
+            raise ValueError("chunk_size must be >= 1.")
+        codebook_weight = self.codebook.weight
+        distances: list[torch.Tensor] = []
+        total_rows = int(flat_inputs.size(0))
+        for start_idx in range(0, total_rows, int(chunk_size)):
+            end_idx = min(start_idx + int(chunk_size), total_rows)
+            current_chunk = flat_inputs[start_idx:end_idx]
+            chunk_distances = torch.cdist(current_chunk, codebook_weight, p=2.0)
+            distances.append(chunk_distances)
+        return torch.cat(distances, dim=0)
+
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize semantic inputs against the codebook.
 
@@ -344,7 +374,7 @@ class SemanticTextVQVAE(nn.Module):
         decoded = self.decoder(
             tgt=tgt_emb,
             memory=memory,
-            tgt_mask=tgt_mask,
+            tgt_is_causal=True,
             tgt_key_padding_mask=padding_mask[:, :-1],
             memory_key_padding_mask=semantic_padding_mask,
         )
