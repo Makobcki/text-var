@@ -5,6 +5,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import argparse
 import math
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+from src.core.training_logger import StepTiming, TrainingStepLogger
 from src.var.checkpoint import load_checkpoint, restore_training_state, save_checkpoint
 from src.var.training.config import TrainConfig, load_train_config
 from src.var.loss import multiscale_next_scale_cross_entropy
@@ -376,6 +378,7 @@ def run_training(cfg: TrainConfig) -> Path:
     apply_phase_freezing(model, current_phase)
 
     model.train()
+    step_logger = TrainingStepLogger("var", int(cfg.max_steps))
     print(f"[TRAIN] Инициализация пройдена успешно. Старт на {device}.")
     stateful_level0_context: torch.Tensor | None = None
 
@@ -392,8 +395,11 @@ def run_training(cfg: TrainConfig) -> Path:
                 apply_phase_freezing(model, current_phase)
                 print(f"[TRAIN] Переключение фазы обучения на: {current_phase + 1}")
 
+            step_start = time.perf_counter()
             non_blocking = bool(cfg.pin_memory) and device.type == "cuda"
+            transfer_start = time.perf_counter()
             moved_tokens = [t.to(device, non_blocking=non_blocking) for t in batch]
+            transfer_time = time.perf_counter() - transfer_start
             dropped_tokens = _apply_unconditional_prefix_dropout(
                 moved_tokens,
                 drop_prob=float(cfg.unconditional_drop_prob),
@@ -404,6 +410,7 @@ def run_training(cfg: TrainConfig) -> Path:
             if (micro_step - 1) % grad_accum_steps == 0:
                 optimizer.zero_grad(set_to_none=True)
 
+            forward_start = time.perf_counter()
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
                 loss = multiscale_next_scale_cross_entropy(
                     model,
@@ -417,8 +424,10 @@ def run_training(cfg: TrainConfig) -> Path:
                     use_early_exit_loss=cfg.use_early_exit_loss,
                     historical_level0_tokens=stateful_level0_context,
                 )
+            forward_time = time.perf_counter() - forward_start
             scaled_loss = loss / grad_accum_steps
 
+            backward_start = time.perf_counter()
             if scaler.is_enabled():
                 scaler.scale(scaled_loss).backward()
                 if should_step:
@@ -436,11 +445,28 @@ def run_training(cfg: TrainConfig) -> Path:
                     optimizer.step()
                     scheduler.step()
 
+            backward_time = time.perf_counter() - backward_start
+            optimizer_time = 0.0
+            if should_step:
+                optimizer_time = max(0.0, time.perf_counter() - step_start - transfer_time - forward_time - backward_time)
+
             if should_step:
                 step += 1
                 accumulated_steps_per_phase += 1
                 last_loss = float(loss.detach().cpu())
-                print(f"[TRAIN] family=var phase={current_phase + 1} step={step}/{cfg.max_steps} loss={last_loss:.6f}")
+                print(step_logger.build_line(
+                    step=step,
+                    loss=last_loss,
+                    timing=StepTiming(
+                        total=time.perf_counter() - step_start,
+                        stages={
+                            "transfer": transfer_time,
+                            "forward": forward_time,
+                            "backward": backward_time,
+                            "optimizer": optimizer_time,
+                        },
+                    ),
+                ))
                 if writer:
                     writer.add_scalar("train/loss", last_loss, step)
                     writer.add_scalar("train/lr", float(scheduler.get_last_lr()[0]), step)
