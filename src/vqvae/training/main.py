@@ -1,7 +1,7 @@
-from pathlib import Path
 import logging
 import signal
 import time
+from pathlib import Path
 
 import torch
 from rich.console import Console
@@ -34,9 +34,11 @@ def _configure_logging(verbose: bool) -> None:
         verbose: Whether debug-level verbose logging is enabled.
     """
     if verbose:
-        logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] - %(message)s - [%(filename)s:%(lineno)d]')
+        logging.basicConfig(
+            level=logging.DEBUG, format="[%(levelname)s] - %(message)s - [%(filename)s:%(lineno)d]"
+        )
         return
-    logging.basicConfig(level=logging.WARNING, format='%(message)s')
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
 
 def _install_signal_handlers(stop_state: dict[str, bool]) -> dict[int, signal.Handlers]:
@@ -48,6 +50,7 @@ def _install_signal_handlers(stop_state: dict[str, bool]) -> dict[int, signal.Ha
     Returns:
         Previous signal handlers.
     """
+
     def _handle_signal(signum: int, _frame: object) -> None:
         LOGGER.warning("Training stop requested by signal %s", signum)
         stop_state["requested"] = True
@@ -74,7 +77,9 @@ def _restore_signal_handlers(previous: dict[int, signal.Handlers]) -> None:
 def _collate_level(level_index: int):
     def collate(batch: list[dict[str, object]]) -> tuple[torch.Tensor, torch.Tensor]:
         tokens = [item["tokens"][level_index] for item in batch]  # type: ignore[index]
-        stacked = torch.stack([t if isinstance(t, torch.Tensor) else torch.as_tensor(t) for t in tokens], dim=0)
+        stacked = torch.stack(
+            [t if isinstance(t, torch.Tensor) else torch.as_tensor(t) for t in tokens], dim=0
+        )
         stacked = stacked.to(dtype=torch.long)
         padding_mask = stacked.eq(0)
         return stacked, padding_mask
@@ -110,7 +115,8 @@ def run_training(
         raise ValueError("gradient_accumulation_steps must be greater than 0.")
 
     if log_every_steps <= 0:
-        raise ValueError("log_every_steps must be greater than 0.")
+        CONSOLE.warning("log_every_steps must be greater than 0, setting to 1")
+        log_every_steps = 1
 
     chunk_paths, metadata = load_token_entries_from_directory(token_cache_dir)
     if not (0 <= int(level_index) < len(metadata.level_lengths)):
@@ -172,13 +178,16 @@ def run_training(
 
     model.train()
     step_logger = TrainingStepLogger("vqvae", steps)
+    loss = None
     step = 0
     micro_step = 0
     stop_state: dict[str, bool] = {"requested": False}
     previous_handlers = _install_signal_handlers(stop_state)
     optimizer.zero_grad(set_to_none=True)
     try:
-        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=CONSOLE) as progress:
+        with Progress(
+            SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=CONSOLE
+        ) as progress:
             task_id = progress.add_task(f"Training VQ-VAE 0/{steps}", total=None)
             while step < steps:
                 if stop_state["requested"]:
@@ -300,7 +309,9 @@ def main() -> None:
         cfg = load_vqvae_train_config(Path(args.config))
     else:
         if not args.output or not args.token_cache_dir:
-            parser.error('--output and --token-cache-dir are required when --config is not provided')
+            parser.error(
+                "--output and --token-cache-dir are required when --config is not provided"
+            )
         cfg = VQVAETrainConfig(
             output=Path(args.output),
             token_cache_dir=Path(args.token_cache_dir),
