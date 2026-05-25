@@ -180,3 +180,16 @@ def test_pool_to_semantic_length_handles_non_contiguous_inputs() -> None:
     pooled = model._pool_to_semantic_length(non_contiguous)
 
     assert pooled.shape == (2, 2, 4)
+
+
+def test_vector_quantizer_forward_accepts_non_contiguous_inputs() -> None:
+    quantizer = VectorQuantizer(num_embeddings=11, embedding_dim=4)
+    contiguous = torch.randn(2, 4, 4, dtype=torch.float32)
+    non_contiguous = contiguous.transpose(1, 2)
+    assert not non_contiguous.is_contiguous()
+
+    quantized, vq_loss, indices = quantizer(non_contiguous)
+
+    assert quantized.shape == non_contiguous.shape
+    assert indices.shape == non_contiguous.shape[:-1]
+    assert torch.isfinite(vq_loss)

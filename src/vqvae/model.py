@@ -57,11 +57,19 @@ class VectorQuantizer(nn.Module):
         return torch.cat(distances, dim=0)
 
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        flat_inputs = inputs.view(-1, self.embedding_dim)
+        """Quantize semantic inputs against the codebook.
+
+        Args:
+            inputs: Tensor with shape ``(B, S, D)``.
+
+        Returns:
+            Tuple ``(quantized, vq_loss, indices)``.
+        """
+        flat_inputs = inputs.reshape(-1, self.embedding_dim)
         distances = self._compute_distances_chunked(flat_inputs)
 
         encoding_indices = torch.argmin(distances, dim=1)
-        quantized = self.codebook(encoding_indices).view(inputs.shape)
+        quantized = self.codebook(encoding_indices).reshape(inputs.shape)
 
         if self.training:
             with torch.no_grad():
@@ -85,7 +93,7 @@ class VectorQuantizer(nn.Module):
         vq_loss = self.commitment_cost * e_latent_loss
 
         quantized = inputs + (quantized - inputs).detach()
-        return quantized, vq_loss, encoding_indices.view(inputs.shape[:-1])
+        return quantized, vq_loss, encoding_indices.reshape(inputs.shape[:-1])
 
 
 class SemanticTextVQVAE(nn.Module):
