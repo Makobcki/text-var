@@ -26,14 +26,39 @@ class VectorQuantizer(nn.Module):
         self.register_buffer("ema_cluster_size", torch.zeros(self.num_embeddings))
         self.register_buffer("ema_w", self.codebook.weight.data.clone())
 
+    def _compute_distances_chunked(
+        self,
+        flat_inputs: torch.Tensor,
+        *,
+        chunk_size: int = 1024,
+    ) -> torch.Tensor:
+        """Compute pairwise Euclidean distances to codebook with bounded peak memory.
+
+        Args:
+            flat_inputs: Flattened input tensor with shape ``(N, D)``.
+            chunk_size: Number of rows processed per chunk.
+
+        Returns:
+            Distance tensor with shape ``(N, num_embeddings)``.
+
+        Raises:
+            ValueError: If ``chunk_size`` is smaller than 1.
+        """
+        if int(chunk_size) < 1:
+            raise ValueError("chunk_size must be >= 1.")
+        codebook_weight = self.codebook.weight
+        distances: list[torch.Tensor] = []
+        total_rows = int(flat_inputs.size(0))
+        for start_idx in range(0, total_rows, int(chunk_size)):
+            end_idx = min(start_idx + int(chunk_size), total_rows)
+            current_chunk = flat_inputs[start_idx:end_idx]
+            chunk_distances = torch.cdist(current_chunk, codebook_weight, p=2.0)
+            distances.append(chunk_distances)
+        return torch.cat(distances, dim=0)
+
     def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat_inputs = inputs.view(-1, self.embedding_dim)
-
-        distances = (
-            torch.sum(flat_inputs**2, dim=1, keepdim=True)
-            + torch.sum(self.codebook.weight**2, dim=1)
-            - 2 * torch.matmul(flat_inputs, self.codebook.weight.t())
-        )
+        distances = self._compute_distances_chunked(flat_inputs)
 
         encoding_indices = torch.argmin(distances, dim=1)
         quantized = self.codebook(encoding_indices).view(inputs.shape)
@@ -100,16 +125,6 @@ class SemanticTextVQVAE(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
-        self._causal_mask_cache: dict[tuple[int, str, torch.dtype], torch.Tensor] = {}
-
-    def _causal_mask(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        key = (int(seq_len), str(device), dtype)
-        cached = self._causal_mask_cache.get(key)
-        if cached is not None:
-            return cached
-        mask = nn.Transformer.generate_square_subsequent_mask(seq_len, device=device).to(dtype)
-        self._causal_mask_cache[key] = mask
-        return mask
 
     def _position_ids(self, seq_len: int, device: torch.device) -> torch.Tensor:
         if int(seq_len) > self.max_position_embeddings:
@@ -120,21 +135,33 @@ class SemanticTextVQVAE(nn.Module):
         return torch.arange(seq_len, device=device).unsqueeze(0)
 
     def _pool_to_semantic_length(self, sequence: torch.Tensor) -> torch.Tensor:
-        """Pool a ``(B, T, C)`` sequence to semantic length."""
+        """Pool a ``(B, T, C)`` sequence to semantic length.
+
+        Args:
+            sequence: Input tensor shaped ``(batch, time, channels)``.
+
+        Returns:
+            Tensor shaped ``(batch, semantic_time, channels)``.
+
+        Raises:
+            ValueError: If the source sequence length is not positive.
+        """
         source_len = int(sequence.shape[1])
         target_len = int(self.semantic_sequence_length)
         if source_len <= 0:
             raise ValueError("Encoded sequence length must be positive.")
         stride = max(1, ceil(source_len / target_len))
+        channel_first = sequence.transpose(1, 2).contiguous()
         pooled = F.avg_pool1d(
-            sequence.transpose(1, 2),
+            channel_first,
             kernel_size=stride,
             stride=stride,
             ceil_mode=True,
         ).transpose(1, 2)
         if int(pooled.shape[1]) == target_len:
             return pooled
-        return F.adaptive_avg_pool1d(pooled.transpose(1, 2), target_len).transpose(1, 2)
+        pooled_channel_first = pooled.transpose(1, 2).contiguous()
+        return F.adaptive_avg_pool1d(pooled_channel_first, target_len).transpose(1, 2)
 
     def _pool_semantic_tokens(
         self,
@@ -242,8 +269,11 @@ class SemanticTextVQVAE(nn.Module):
         for _ in range(int(max_length) - 1):
             positions = self._position_ids(generated.size(1), generated.device)
             tgt_emb = self.embedding(generated) + self.pos_embedding(positions)
-            tgt_mask = self._causal_mask(generated.size(1), generated.device, tgt_emb.dtype)
-            decoded = self.decoder(tgt=tgt_emb, memory=memory, tgt_mask=tgt_mask)
+            decoded = self.decoder(
+                tgt=tgt_emb,
+                memory=memory,
+                tgt_is_causal=True,
+            )
             logits = self.lm_head(decoded)[:, -1, :] / float(temperature)
             sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
             sorted_probs = F.softmax(sorted_logits, dim=-1)
@@ -286,16 +316,11 @@ class SemanticTextVQVAE(nn.Module):
         # Превращаем квантованный вектор предложения в контекст (memory) для Cross-Attention
         memory = quantized  # Формат: (B, S_sem, hidden_size)
 
-        # Казуальная маска для декодера
-        device = bpe_tokens.device
-        tgt_len = tgt_tokens.size(1)
-        tgt_mask = self._causal_mask(tgt_len, device, tgt_emb.dtype)
-
         # Восстановление скрытых представлений и проекция в вокабуляр
         decoded = self.decoder(
             tgt=tgt_emb,
             memory=memory,
-            tgt_mask=tgt_mask,
+            tgt_is_causal=True,
             tgt_key_padding_mask=padding_mask[:, :-1],
             memory_key_padding_mask=semantic_padding_mask,
         )
@@ -306,12 +331,13 @@ class SemanticTextVQVAE(nn.Module):
         recon_targets = bpe_tokens[:, 1:]
 
         loss_mask = padding_mask[:, 1:]
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)), recon_targets.reshape(-1), reduction="none"
+        masked_targets = recon_targets.masked_fill(loss_mask, int(self.pad_token_id))
+        recon_loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            masked_targets.reshape(-1),
+            ignore_index=int(self.pad_token_id),
+            reduction="mean",
         )
-        loss = loss.view(recon_targets.shape)
-        loss = loss.masked_fill(loss_mask, 0.0)
-        recon_loss = loss.sum() / (~loss_mask).sum().clamp(min=1)
 
         # Итоговый лосс для pre-train этапа
         total_loss = recon_loss + vq_loss
