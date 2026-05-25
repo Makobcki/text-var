@@ -1,6 +1,6 @@
 import torch
 
-from src.vqvae.model import SemanticTextVQVAE
+from src.vqvae.model import SemanticTextVQVAE, VectorQuantizer
 
 
 def test_resolve_padding_mask_infers_from_pad_token_id() -> None:
@@ -110,3 +110,86 @@ def test_pool_semantic_padding_mask_marks_all_padded_windows() -> None:
     semantic_mask = model._pool_semantic_padding_mask(padding_mask)
 
     assert torch.equal(semantic_mask, torch.tensor([[False, True]]))
+
+
+def test_forward_ignores_padding_tokens_in_reconstruction_loss() -> None:
+    model = SemanticTextVQVAE(
+        vocab_size=16,
+        hidden_size=8,
+        num_semantic_tokens=8,
+        semantic_sequence_length=2,
+        pad_token_id=0,
+    ).eval()
+    tokens = torch.tensor([[1, 2, 3, 0], [4, 5, 0, 0]], dtype=torch.long)
+    padding_mask = tokens.eq(0)
+
+    logits, total_loss = model(tokens, padding_mask=padding_mask)
+    recon_targets = tokens[:, 1:]
+    loss_mask = padding_mask[:, 1:]
+    masked_targets = recon_targets.masked_fill(loss_mask, 0)
+    expected_recon = torch.nn.functional.cross_entropy(
+        logits.reshape(-1, logits.size(-1)),
+        masked_targets.reshape(-1),
+        ignore_index=0,
+        reduction="mean",
+    )
+
+    expected_total = expected_recon + model.quantizer.last_commitment_loss
+    assert torch.isfinite(total_loss)
+    assert torch.allclose(total_loss, expected_total, atol=1e-5)
+
+
+def test_vector_quantizer_chunked_distances_match_direct_cdist() -> None:
+    quantizer = VectorQuantizer(num_embeddings=7, embedding_dim=3)
+    flat_inputs = torch.tensor(
+        [[0.1, 0.2, 0.3], [1.0, -0.1, 0.5], [-0.2, 0.4, -0.7]],
+        dtype=torch.float32,
+    )
+
+    expected = torch.cdist(flat_inputs, quantizer.codebook.weight, p=2.0)
+    actual = quantizer._compute_distances_chunked(flat_inputs, chunk_size=2)
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_vector_quantizer_chunked_distances_reject_invalid_chunk_size() -> None:
+    quantizer = VectorQuantizer(num_embeddings=5, embedding_dim=2)
+    flat_inputs = torch.randn(4, 2)
+
+    try:
+        _ = quantizer._compute_distances_chunked(flat_inputs, chunk_size=0)
+    except ValueError as exc:
+        assert "chunk_size must be >= 1." in str(exc)
+        return
+
+    raise AssertionError("Expected ValueError for invalid chunk_size.")
+
+
+def test_pool_to_semantic_length_handles_non_contiguous_inputs() -> None:
+    model = SemanticTextVQVAE(
+        vocab_size=32,
+        hidden_size=4,
+        num_semantic_tokens=8,
+        semantic_sequence_length=2,
+        pad_token_id=0,
+    )
+    base = torch.arange(2 * 4 * 4, dtype=torch.float32).reshape(2, 4, 4)
+    non_contiguous = base.transpose(1, 2)
+    assert not non_contiguous.is_contiguous()
+
+    pooled = model._pool_to_semantic_length(non_contiguous)
+
+    assert pooled.shape == (2, 2, 4)
+
+
+def test_vector_quantizer_forward_accepts_non_contiguous_inputs() -> None:
+    quantizer = VectorQuantizer(num_embeddings=11, embedding_dim=4)
+    contiguous = torch.randn(2, 4, 4, dtype=torch.float32)
+    non_contiguous = contiguous.transpose(1, 2)
+    assert not non_contiguous.is_contiguous()
+
+    quantized, vq_loss, indices = quantizer(non_contiguous)
+
+    assert quantized.shape == non_contiguous.shape
+    assert indices.shape == non_contiguous.shape[:-1]
+    assert torch.isfinite(vq_loss)
