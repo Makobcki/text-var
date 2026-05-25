@@ -52,18 +52,14 @@ class TrainingStepLogger:
         perplexity = math.exp(min(20.0, safe_loss))
         elapsed = max(1e-9, time.perf_counter() - self._time_origin)
         eta_minutes = self._estimate_eta_minutes(step=step, elapsed=elapsed)
-        stage_stats = " ".join(
-            f"{name}={value:.3f}s" for name, value in timing.stages.items()
-        )
-        if stage_stats:
-            stage_stats = f" stages=({stage_stats})"
+        stage_stats = " ".join(f"{name}={value:.3f}s" for name, value in timing.stages.items())
 
         return (
             f"[{self._architecture}] step={step}/{self._total_steps} "
             f"loss={safe_loss:.6f} "
             f"perplexity={perplexity:.4f} "
             f"time={timing.total:.3f}s"
-            f"{stage_stats} "
+            f" {stage_stats} "
             f"eta={eta_minutes:.2f}m"
         )
 
