@@ -112,26 +112,15 @@ class SemanticTextVQVAE(nn.Module):
             )
         return torch.arange(seq_len, device=device).unsqueeze(0)
 
-    def _pool_semantic_tokens(self, encoded: torch.Tensor) -> torch.Tensor:
-        """Downsample encoder states to semantic token sequence length.
-
-        Uses local average pooling with stride to preserve token-level locality
-        before optional adaptive resampling to the configured semantic length.
-
-        Args:
-            encoded: Encoder output tensor with shape ``(B, T, H)``.
-
-        Returns:
-            Semantic feature tensor with shape ``(B, S, H)`` where
-            ``S == self.semantic_sequence_length``.
-        """
-        source_len = int(encoded.shape[1])
+    def _pool_to_semantic_length(self, sequence: torch.Tensor) -> torch.Tensor:
+        """Pool a ``(B, T, C)`` sequence to semantic length."""
+        source_len = int(sequence.shape[1])
         target_len = int(self.semantic_sequence_length)
         if source_len <= 0:
             raise ValueError("Encoded sequence length must be positive.")
         stride = max(1, ceil(source_len / target_len))
         pooled = F.avg_pool1d(
-            encoded.transpose(1, 2),
+            sequence.transpose(1, 2),
             kernel_size=stride,
             stride=stride,
             ceil_mode=True,
@@ -139,6 +128,39 @@ class SemanticTextVQVAE(nn.Module):
         if int(pooled.shape[1]) == target_len:
             return pooled
         return F.adaptive_avg_pool1d(pooled.transpose(1, 2), target_len).transpose(1, 2)
+
+    def _pool_semantic_tokens(
+        self,
+        encoded: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Downsample encoder states to semantic token sequence length.
+
+        Uses local average pooling with stride to preserve token-level locality
+        before optional adaptive resampling to the configured semantic length.
+
+        Args:
+            encoded: Encoder output tensor with shape ``(B, T, H)``.
+            padding_mask: Optional token-level padding mask with shape ``(B, T)``
+                where ``True`` marks padded positions.
+
+        Returns:
+            Semantic feature tensor with shape ``(B, S, H)`` where
+            ``S == self.semantic_sequence_length``.
+        """
+        if padding_mask is None:
+            return self._pool_to_semantic_length(encoded)
+
+        valid_mask = (~padding_mask).unsqueeze(-1).to(dtype=encoded.dtype)
+        masked_encoded = encoded * valid_mask
+        pooled_sum = self._pool_to_semantic_length(masked_encoded)
+        pooled_valid = self._pool_to_semantic_length(valid_mask).clamp_min(1e-6)
+        return pooled_sum / pooled_valid
+
+    def _pool_semantic_padding_mask(self, padding_mask: torch.Tensor) -> torch.Tensor:
+        """Pool token padding mask to semantic-token resolution."""
+        pooled = self._pool_to_semantic_length(padding_mask.unsqueeze(-1).float()).squeeze(-1)
+        return pooled > 0
 
     def _resolve_padding_mask(
         self,
@@ -158,7 +180,7 @@ class SemanticTextVQVAE(nn.Module):
         x = self.embedding(bpe_tokens) + self.pos_embedding(positions)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        semantic_inputs = self._pool_semantic_tokens(encoded)
+        semantic_inputs = self._pool_semantic_tokens(encoded, padding_mask=padding_mask)
         _, vq_loss, semantic_idx = self.quantizer(semantic_inputs)
         return semantic_idx, vq_loss
 
@@ -245,10 +267,11 @@ class SemanticTextVQVAE(nn.Module):
         x = self.embedding(bpe_tokens) + self.pos_embedding(positions)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
-        semantic_inputs = self._pool_semantic_tokens(encoded)
+        semantic_inputs = self._pool_semantic_tokens(encoded, padding_mask=padding_mask)
+        semantic_padding_mask = self._pool_semantic_padding_mask(padding_mask)
 
         # --- 2. ЭТАП КВАНТОВАНИЯ ---
-        quantized, vq_loss, semantic_idx = self.quantizer(semantic_inputs)
+        quantized, vq_loss, _ = self.quantizer(semantic_inputs)
 
         # --- 3. ЭТАП ДЕКОДИРОВАНИЯ (Causal AR Reconstruction) ---
         # Сдвигаем токены для входа декодера, чтобы исключить читерство через self-attention
@@ -265,7 +288,13 @@ class SemanticTextVQVAE(nn.Module):
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len, device=device)
 
         # Восстановление скрытых представлений и проекция в вокабуляр
-        decoded = self.decoder(tgt=tgt_emb, memory=memory, tgt_mask=tgt_mask)
+        decoded = self.decoder(
+            tgt=tgt_emb,
+            memory=memory,
+            tgt_mask=tgt_mask,
+            tgt_key_padding_mask=padding_mask[:, :-1],
+            memory_key_padding_mask=semantic_padding_mask,
+        )
         logits = self.lm_head(decoded)
 
         # --- 4. РАСЧЕТ РЕКОНСТРУКЦИИ (Reconstruction Loss) ---
