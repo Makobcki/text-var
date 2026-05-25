@@ -74,14 +74,17 @@ class SemanticTextVQVAE(nn.Module):
         num_semantic_tokens: int = 4096,
         semantic_sequence_length: int = 1,
         pad_token_id: int = 0,
+        max_position_embeddings: int = 2048,
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.pad_token_id = int(pad_token_id)
         self.semantic_sequence_length = max(1, int(semantic_sequence_length))
+        self.max_position_embeddings = int(max_position_embeddings)
 
         self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.pos_embedding = nn.Embedding(self.max_position_embeddings, hidden_size)
 
         # Энкодер архитектуры
         encoder_layer = nn.TransformerEncoderLayer(
@@ -100,6 +103,14 @@ class SemanticTextVQVAE(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
+
+    def _position_ids(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        if int(seq_len) > self.max_position_embeddings:
+            raise ValueError(
+                f"Sequence length {seq_len} exceeds max_position_embeddings="
+                f"{self.max_position_embeddings}."
+            )
+        return torch.arange(seq_len, device=device).unsqueeze(0)
 
     def _pool_semantic_tokens(self, encoded: torch.Tensor) -> torch.Tensor:
         """Downsample encoder states to semantic token sequence length.
@@ -143,7 +154,8 @@ class SemanticTextVQVAE(nn.Module):
         self, bpe_tokens: torch.Tensor, padding_mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         padding_mask = self._resolve_padding_mask(bpe_tokens, padding_mask)
-        x = self.embedding(bpe_tokens)
+        positions = self._position_ids(bpe_tokens.size(1), bpe_tokens.device)
+        x = self.embedding(bpe_tokens) + self.pos_embedding(positions)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
         semantic_inputs = self._pool_semantic_tokens(encoded)
@@ -199,7 +211,8 @@ class SemanticTextVQVAE(nn.Module):
         )
 
         for _ in range(int(max_length) - 1):
-            tgt_emb = self.embedding(generated)
+            positions = self._position_ids(generated.size(1), generated.device)
+            tgt_emb = self.embedding(generated) + self.pos_embedding(positions)
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(
                 generated.size(1),
                 device=generated.device,
@@ -228,7 +241,8 @@ class SemanticTextVQVAE(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         padding_mask = self._resolve_padding_mask(bpe_tokens, padding_mask)
         # --- 1. ЭТАП ЭНКОДИНГА ---
-        x = self.embedding(bpe_tokens)
+        positions = self._position_ids(bpe_tokens.size(1), bpe_tokens.device)
+        x = self.embedding(bpe_tokens) + self.pos_embedding(positions)
         encoded = self.encoder(x, src_key_padding_mask=padding_mask)
 
         semantic_inputs = self._pool_semantic_tokens(encoded)
@@ -239,7 +253,8 @@ class SemanticTextVQVAE(nn.Module):
         # --- 3. ЭТАП ДЕКОДИРОВАНИЯ (Causal AR Reconstruction) ---
         # Сдвигаем токены для входа декодера, чтобы исключить читерство через self-attention
         tgt_tokens = bpe_tokens[:, :-1]
-        tgt_emb = self.embedding(tgt_tokens)
+        tgt_positions = positions[:, :-1]
+        tgt_emb = self.embedding(tgt_tokens) + self.pos_embedding(tgt_positions)
 
         # Превращаем квантованный вектор предложения в контекст (memory) для Cross-Attention
         memory = quantized  # Формат: (B, S_sem, hidden_size)
