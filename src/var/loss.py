@@ -42,6 +42,7 @@ def multiscale_next_scale_cross_entropy(
     use_early_exit_loss: bool = False,
     historical_level0_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    precomputed_memories: list[torch.Tensor] | None = None
     def _weighted_token_loss(
         per_token_losses: torch.Tensor,
         *,
@@ -71,8 +72,8 @@ def multiscale_next_scale_cross_entropy(
                 dtype=reference.dtype,
             )
 
-        token_weights = torch.ones_like(per_token_losses, dtype=reference.dtype)
-        token_weights[mask] = float(masked_loss_weight)
+        mask_factor = mask.to(dtype=reference.dtype)
+        token_weights = 1.0 + mask_factor * (float(masked_loss_weight) - 1.0)
         weighted_losses = per_token_losses * token_weights
         return weighted_losses.sum(), token_weights.sum().clamp_min(1.0)
 
@@ -104,6 +105,13 @@ def multiscale_next_scale_cross_entropy(
     batch_size = moved_tokens[0].size(0)
     use_flash = bool(getattr(model.cfg, "flash_cross_entropy", True))
     ignore_index = getattr(model.cfg, "pad_token_id", None)
+
+    if isinstance(model, VARTransformer):
+        _, precomputed_memories = model._encode_prefix_memories(
+            prefix_inputs=moved_tokens[:-1],
+            batch_size=batch_size,
+            compact_memory_for_final_level=True,
+        )
 
     for target_idx in range(len(moved_tokens)):
         prefix_inputs = moved_tokens[:target_idx]
@@ -146,6 +154,9 @@ def multiscale_next_scale_cross_entropy(
                 current_level_input=model_input,
                 batch_size=batch_size,
                 return_early_outputs=True,
+                precomputed_final_memory=(
+                    precomputed_memories[target_idx] if precomputed_memories is not None else None
+                ),
             )
             all_predictions = early_outputs + [final_pred]
         else:
@@ -155,6 +166,9 @@ def multiscale_next_scale_cross_entropy(
                 current_level_input=model_input,
                 batch_size=batch_size,
                 return_early_outputs=False,
+                precomputed_final_memory=(
+                    precomputed_memories[target_idx] if precomputed_memories is not None else None
+                ),
             )
             all_predictions = [final_pred]
 
