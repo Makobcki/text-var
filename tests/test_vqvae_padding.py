@@ -193,3 +193,13 @@ def test_vector_quantizer_forward_accepts_non_contiguous_inputs() -> None:
     assert quantized.shape == non_contiguous.shape
     assert indices.shape == non_contiguous.shape[:-1]
     assert torch.isfinite(vq_loss)
+
+
+def test_build_causal_mask_shape_and_finite_entries() -> None:
+    model = SemanticTextVQVAE(vocab_size=32, hidden_size=8, num_semantic_tokens=8, pad_token_id=0)
+
+    mask = model._build_causal_mask(seq_len=4, device=torch.device("cpu"))
+
+    assert mask.shape == (4, 4)
+    assert torch.isfinite(mask.diag()).all()
+    assert torch.isinf(mask[0, 1])

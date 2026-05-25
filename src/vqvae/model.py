@@ -25,6 +25,37 @@ class VectorQuantizer(nn.Module):
         self.codebook.weight.data.uniform_(-1.0 / self.num_embeddings, 1.0 / self.num_embeddings)
         self.register_buffer("ema_cluster_size", torch.zeros(self.num_embeddings))
         self.register_buffer("ema_w", self.codebook.weight.data.clone())
+        self.last_commitment_loss: torch.Tensor | None = None
+
+    def _compute_distances_chunked(
+        self,
+        flat_inputs: torch.Tensor,
+        *,
+        chunk_size: int = 1024,
+    ) -> torch.Tensor:
+        """Compute pairwise Euclidean distances to codebook with bounded peak memory.
+
+        Args:
+            flat_inputs: Flattened input tensor with shape ``(N, D)``.
+            chunk_size: Number of rows processed per chunk.
+
+        Returns:
+            Distance tensor with shape ``(N, num_embeddings)``.
+
+        Raises:
+            ValueError: If ``chunk_size`` is smaller than 1.
+        """
+        if int(chunk_size) < 1:
+            raise ValueError("chunk_size must be >= 1.")
+        codebook_weight = self.codebook.weight
+        distances: list[torch.Tensor] = []
+        total_rows = int(flat_inputs.size(0))
+        for start_idx in range(0, total_rows, int(chunk_size)):
+            end_idx = min(start_idx + int(chunk_size), total_rows)
+            current_chunk = flat_inputs[start_idx:end_idx]
+            chunk_distances = torch.cdist(current_chunk, codebook_weight, p=2.0)
+            distances.append(chunk_distances)
+        return torch.cat(distances, dim=0)
 
     def _compute_distances_chunked(
         self,
@@ -91,6 +122,7 @@ class VectorQuantizer(nn.Module):
 
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
         vq_loss = self.commitment_cost * e_latent_loss
+        self.last_commitment_loss = vq_loss.detach()
 
         quantized = inputs + (quantized - inputs).detach()
         return quantized, vq_loss, encoding_indices.reshape(inputs.shape[:-1])
@@ -133,6 +165,18 @@ class SemanticTextVQVAE(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
+
+    def _build_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """Build an upper-triangular causal mask for decoder self-attention.
+
+        Args:
+            seq_len: Target sequence length.
+            device: Target device for mask allocation.
+
+        Returns:
+            Float mask tensor compatible with ``nn.TransformerDecoder``.
+        """
+        return nn.Transformer.generate_square_subsequent_mask(int(seq_len), device=device)
 
     def _position_ids(self, seq_len: int, device: torch.device) -> torch.Tensor:
         if int(seq_len) > self.max_position_embeddings:
@@ -277,10 +321,11 @@ class SemanticTextVQVAE(nn.Module):
         for _ in range(int(max_length) - 1):
             positions = self._position_ids(generated.size(1), generated.device)
             tgt_emb = self.embedding(generated) + self.pos_embedding(positions)
+            tgt_mask = self._build_causal_mask(generated.size(1), generated.device)
             decoded = self.decoder(
                 tgt=tgt_emb,
                 memory=memory,
-                tgt_is_causal=True,
+                tgt_mask=tgt_mask,
             )
             logits = self.lm_head(decoded)[:, -1, :] / float(temperature)
             sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
@@ -325,6 +370,7 @@ class SemanticTextVQVAE(nn.Module):
         memory = quantized  # Формат: (B, S_sem, hidden_size)
 
         # Восстановление скрытых представлений и проекция в вокабуляр
+        tgt_mask = self._build_causal_mask(tgt_emb.size(1), bpe_tokens.device)
         decoded = self.decoder(
             tgt=tgt_emb,
             memory=memory,
