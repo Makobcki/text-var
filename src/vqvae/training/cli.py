@@ -28,4 +28,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--level-index', type=int, default=2)
     parser.add_argument('--gradient-accumulation-steps', type=int, default=1)
+    parser.add_argument('--dataloader-num-workers', type=int, default=4)
+    parser.add_argument('--dataloader-prefetch-factor', type=int, default=2)
+    parser.add_argument('--amp-dtype', type=str, default='bf16', choices=('bf16', 'fp16', 'none'))
+    parser.add_argument('--use-torch-compile', action='store_true')
+    parser.add_argument('--log-every-steps', type=int, default=10)
+    parser.add_argument('-v', '--verbose', action='store_true')
     return parser

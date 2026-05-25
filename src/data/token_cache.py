@@ -4,11 +4,18 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 from typing import Any
 
 import torch
 from safetensors.torch import load_file
 from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import get_worker_info
+
+
+class TokenCacheDataError(ValueError):
+    """Raised when token cache files contain malformed payloads."""
 
 
 @dataclass(frozen=True)
@@ -152,27 +159,50 @@ def load_token_entries_from_directory(
     return chunk_paths, metadata
 
 
-def _iter_safetensors_entries(chunk_path: Path, metadata: TokenCacheMetadata):
+def _iter_safetensors_entries(
+    chunk_path: Path,
+    metadata: TokenCacheMetadata,
+    *,
+    validate_ranges: bool,
+):
+    """Yield entries from a single safetensors token chunk.
+
+    Args:
+        chunk_path: Input safetensors file path.
+        metadata: Expected token-cache metadata.
+        validate_ranges: Whether to validate min/max token ranges.
+
+    Yields:
+        Parsed token-cache entries.
+
+    Raises:
+        TokenCacheDataError: If payload structure is invalid.
+    """
     payload = load_file(str(chunk_path), device="cpu")
     ids = payload.get("ids")
     if ids is None or ids.dim() != 1:
-        raise ValueError(f"Chunk {chunk_path} must contain a 1D ids tensor.")
+        raise TokenCacheDataError(f"Chunk {chunk_path} must contain a 1D ids tensor.")
 
     level_tensors: list[torch.Tensor] = []
     for level_idx, expected_length in enumerate(metadata.level_lengths):
         level_tensor = payload.get(f"tokens_level_{level_idx}")
         if level_tensor is None or level_tensor.dim() != 2:
-            raise ValueError(f"Chunk {chunk_path} missing tokens_level_{level_idx} tensor.")
+            raise TokenCacheDataError(f"Chunk {chunk_path} missing tokens_level_{level_idx} tensor.")
         if level_tensor.shape[0] != ids.shape[0] or level_tensor.shape[1] != expected_length:
-            raise ValueError(f"Chunk {chunk_path} has invalid shape for tokens_level_{level_idx}.")
+            raise TokenCacheDataError(
+                f"Chunk {chunk_path} has invalid shape for tokens_level_{level_idx}."
+            )
         level_tensors.append(level_tensor)
 
     for row_idx in range(ids.shape[0]):
         out = [torch.as_tensor(level_tensor[row_idx], dtype=torch.long) for level_tensor in level_tensors]
-        for lvl_idx, vocab_size in enumerate(metadata.level_vocab_sizes):
-            item = out[lvl_idx]
-            if item.numel() and (int(item.max().item()) >= vocab_size or int(item.min().item()) < 0):
-                raise ValueError("Token value outside tokenizer codebook.")
+        if validate_ranges:
+            for lvl_idx, vocab_size in enumerate(metadata.level_vocab_sizes):
+                item = out[lvl_idx]
+                if item.numel() and (
+                    int(item.max().item()) >= vocab_size or int(item.min().item()) < 0
+                ):
+                    raise TokenCacheDataError("Token value outside tokenizer codebook.")
         yield {
             "id": str(int(ids[row_idx].item())),
             "tokens": out,
@@ -181,44 +211,116 @@ def _iter_safetensors_entries(chunk_path: Path, metadata: TokenCacheMetadata):
 
 
 class MultiscaleTokenChunkIterableDataset(IterableDataset):
-    def __init__(self, chunk_paths: list[Path], metadata: TokenCacheMetadata) -> None:
+    def __init__(
+        self,
+        chunk_paths: list[Path],
+        metadata: TokenCacheMetadata,
+        *,
+        validate_ranges: bool = False,
+    ) -> None:
         self.chunk_paths = list(chunk_paths)
         self.metadata = metadata
+        self.validate_ranges = bool(validate_ranges)
+
+    def _sharded_chunk_paths(self) -> list[Path]:
+        """Return worker-specific shard of chunk paths.
+
+        Returns:
+            List of chunk paths assigned to current DataLoader worker.
+        """
+        worker_info = get_worker_info()
+        if worker_info is None:
+            return self.chunk_paths
+        return self.chunk_paths[worker_info.id :: worker_info.num_workers]
+
+    def _iter_chunk_entries(self, chunk_path: Path):
+        """Yield entries from one chunk file.
+
+        Args:
+            chunk_path: Token-chunk path.
+
+        Yields:
+            Parsed entries.
+
+        Raises:
+            TokenCacheDataError: If chunk payload is malformed.
+        """
+        if chunk_path.suffix == ".safetensors":
+            yield from _iter_safetensors_entries(
+                chunk_path,
+                self.metadata,
+                validate_ranges=self.validate_ranges,
+            )
+            return
+
+        payload = torch.load(chunk_path, map_location="cpu")
+        entries = payload.get("entries") if isinstance(payload, dict) else None
+        if not isinstance(entries, list):
+            raise TokenCacheDataError(f"Chunk {chunk_path} must contain an entries list.")
+
+        for index, entry in enumerate(entries):
+            tokens = entry.get("tokens") if isinstance(entry, dict) else None
+            if not isinstance(tokens, list) or len(tokens) != len(self.metadata.level_lengths):
+                raise TokenCacheDataError(f"Token cache entry has invalid scale count in {chunk_path}.")
+
+            out = [torch.as_tensor(item, dtype=torch.long) for item in tokens]
+            for lvl_idx, (expected, vocab_size) in enumerate(
+                zip(self.metadata.level_lengths, self.metadata.level_vocab_sizes)
+            ):
+                item = out[lvl_idx]
+                if item.numel() != expected:
+                    raise TokenCacheDataError(
+                        f"Token level {lvl_idx} expected {expected} tokens, got {item.numel()}."
+                    )
+                if self.validate_ranges and item.numel() and (
+                    int(item.max().item()) >= vocab_size or int(item.min().item()) < 0
+                ):
+                    raise TokenCacheDataError("Token value outside tokenizer codebook.")
+
+            yield {
+                "id": entry.get("id", f"{chunk_path.name}:{index}"),
+                "tokens": out,
+                "metadata": self.metadata,
+            }
+
+    def _iter_with_prefetch(self, chunk_paths: list[Path]):
+        """Prefetch chunk parsing in a producer thread to hide I/O latency.
+
+        Args:
+            chunk_paths: Worker-assigned chunk paths.
+
+        Yields:
+            Parsed token entries.
+        """
+        queue: Queue[dict[str, object] | BaseException | None] = Queue(maxsize=128)
+
+        def producer() -> None:
+            try:
+                for path in chunk_paths:
+                    for record in self._iter_chunk_entries(path):
+                        queue.put(record)
+            except BaseException as error:
+                queue.put(error)
+            finally:
+                queue.put(None)
+
+        worker_thread = Thread(target=producer, daemon=True)
+        worker_thread.start()
+        while True:
+            item = queue.get()
+            if item is None:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
 
     def __iter__(self):
-        for chunk_path in self.chunk_paths:
-            if chunk_path.suffix == ".safetensors":
-                yield from _iter_safetensors_entries(chunk_path, self.metadata)
-                continue
-            payload = torch.load(chunk_path, map_location="cpu")
-            entries = payload.get("entries") if isinstance(payload, dict) else None
-            if not isinstance(entries, list):
-                raise ValueError(f"Chunk {chunk_path} must contain an entries list.")
-
-            for index, entry in enumerate(entries):
-                tokens = entry.get("tokens") if isinstance(entry, dict) else None
-                if not isinstance(tokens, list) or len(tokens) != len(self.metadata.level_lengths):
-                    raise ValueError(f"Token cache entry has invalid scale count in {chunk_path}.")
-
-                out = [torch.as_tensor(item, dtype=torch.long) for item in tokens]
-                for lvl_idx, (expected, vocab_size) in enumerate(
-                    zip(self.metadata.level_lengths, self.metadata.level_vocab_sizes)
-                ):
-                    item = out[lvl_idx]
-                    if item.numel() != expected:
-                        raise ValueError(
-                            f"Token level {lvl_idx} expected {expected} tokens, got {item.numel()}."
-                        )
-                    if item.numel() and (
-                        int(item.max().item()) >= vocab_size or int(item.min().item()) < 0
-                    ):
-                        raise ValueError("Token value outside tokenizer codebook.")
-
-                yield {
-                    "id": entry.get("id", f"{chunk_path.name}:{index}"),
-                    "tokens": out,
-                    "metadata": self.metadata,
-                }
+        chunk_paths = self._sharded_chunk_paths()
+        if len(chunk_paths) <= 1:
+            for chunk_path in chunk_paths:
+                yield from self._iter_chunk_entries(chunk_path)
+            return
+        yield from self._iter_with_prefetch(chunk_paths)
 
 
 class MultiscaleTokenDataset(Dataset):

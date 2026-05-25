@@ -35,21 +35,18 @@ class VectorQuantizer(nn.Module):
             - 2 * torch.matmul(flat_inputs, self.codebook.weight.t())
         )
 
-        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
-        encodings = torch.zeros(
-            encoding_indices.shape[0], self.num_embeddings, device=inputs.device
-        )
-        encodings.scatter_(1, encoding_indices, 1)
-
-        quantized = torch.matmul(encodings, self.codebook.weight).view(inputs.shape)
+        encoding_indices = torch.argmin(distances, dim=1)
+        quantized = self.codebook(encoding_indices).view(inputs.shape)
 
         if self.training:
             with torch.no_grad():
-                cluster_size = encodings.sum(dim=0)
+                cluster_size = torch.bincount(encoding_indices, minlength=self.num_embeddings).to(
+                    dtype=flat_inputs.dtype
+                )
                 self.ema_cluster_size.mul_(self.decay).add_(cluster_size, alpha=1.0 - self.decay)
 
-                # Граф больше не отслеживается, память свободна
-                dw = torch.matmul(encodings.t(), flat_inputs)
+                dw = torch.zeros_like(self.ema_w)
+                dw.index_add_(0, encoding_indices, flat_inputs)
 
                 self.ema_w.mul_(self.decay).add_(dw, alpha=1.0 - self.decay)
                 n = self.ema_cluster_size.sum()
@@ -103,6 +100,16 @@ class SemanticTextVQVAE(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
+        self._causal_mask_cache: dict[tuple[int, str, torch.dtype], torch.Tensor] = {}
+
+    def _causal_mask(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (int(seq_len), str(device), dtype)
+        cached = self._causal_mask_cache.get(key)
+        if cached is not None:
+            return cached
+        mask = nn.Transformer.generate_square_subsequent_mask(seq_len, device=device).to(dtype)
+        self._causal_mask_cache[key] = mask
+        return mask
 
     def _position_ids(self, seq_len: int, device: torch.device) -> torch.Tensor:
         if int(seq_len) > self.max_position_embeddings:
@@ -235,10 +242,7 @@ class SemanticTextVQVAE(nn.Module):
         for _ in range(int(max_length) - 1):
             positions = self._position_ids(generated.size(1), generated.device)
             tgt_emb = self.embedding(generated) + self.pos_embedding(positions)
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
-                generated.size(1),
-                device=generated.device,
-            )
+            tgt_mask = self._causal_mask(generated.size(1), generated.device, tgt_emb.dtype)
             decoded = self.decoder(tgt=tgt_emb, memory=memory, tgt_mask=tgt_mask)
             logits = self.lm_head(decoded)[:, -1, :] / float(temperature)
             sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
@@ -285,7 +289,7 @@ class SemanticTextVQVAE(nn.Module):
         # Казуальная маска для декодера
         device = bpe_tokens.device
         tgt_len = tgt_tokens.size(1)
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len, device=device)
+        tgt_mask = self._causal_mask(tgt_len, device, tgt_emb.dtype)
 
         # Восстановление скрытых представлений и проекция в вокабуляр
         decoded = self.decoder(
