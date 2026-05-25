@@ -105,9 +105,14 @@ def _apply_unconditional_prefix_dropout(
     if not bool(drop_mask.any()):
         return moved_tokens
 
-    dropped_tokens = [level_tokens.clone() for level_tokens in moved_tokens]
-    for level_idx in range(max(0, len(dropped_tokens) - 1)):
-        dropped_tokens[level_idx][drop_mask] = 0
+    dropped_tokens: list[torch.Tensor] = []
+    prefix_levels = max(0, len(moved_tokens) - 1)
+    for level_idx, level_tokens in enumerate(moved_tokens):
+        if level_idx >= prefix_levels:
+            dropped_tokens.append(level_tokens)
+            continue
+        mask_2d = drop_mask.view(-1, 1).expand_as(level_tokens)
+        dropped_tokens.append(torch.where(mask_2d, torch.zeros((), dtype=level_tokens.dtype, device=device), level_tokens))
     return dropped_tokens
 
 
