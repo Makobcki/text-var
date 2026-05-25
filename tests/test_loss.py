@@ -57,8 +57,9 @@ class _DummyModel:
         current_level_input,
         batch_size,
         return_early_outputs,
+        precomputed_final_memory=None,
     ):
-        del prefix_inputs, target_level, batch_size, return_early_outputs
+        del prefix_inputs, target_level, batch_size, return_early_outputs, precomputed_final_memory
         seq_len = current_level_input.shape[1]
         return torch.zeros((1, seq_len, 4), dtype=torch.float32)
 
@@ -117,4 +118,3 @@ def test_masked_weighting_is_stable_for_sparse_mask() -> None:
     assert torch.isfinite(loss_b)
     assert float(loss_a) > 0.0
     assert float(loss_b) > 0.0
-
