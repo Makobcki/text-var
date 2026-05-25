@@ -75,3 +75,38 @@ def test_decode_from_semantic_indices_respects_position_limit() -> None:
         return
 
     raise AssertionError("Expected ValueError for generation beyond position limit.")
+
+
+def test_pool_semantic_tokens_ignores_padded_positions() -> None:
+    model = SemanticTextVQVAE(
+        vocab_size=32,
+        hidden_size=2,
+        num_semantic_tokens=8,
+        semantic_sequence_length=2,
+        pad_token_id=0,
+    )
+    encoded = torch.tensor(
+        [[[2.0, 4.0], [8.0, 10.0], [100.0, 100.0], [100.0, 100.0]]],
+        dtype=torch.float32,
+    )
+    padding_mask = torch.tensor([[False, False, True, True]], dtype=torch.bool)
+
+    pooled = model._pool_semantic_tokens(encoded, padding_mask=padding_mask)
+
+    expected = torch.tensor([[[5.0, 7.0], [0.0, 0.0]]], dtype=torch.float32)
+    assert torch.allclose(pooled, expected, atol=1e-5)
+
+
+def test_pool_semantic_padding_mask_marks_all_padded_windows() -> None:
+    model = SemanticTextVQVAE(
+        vocab_size=32,
+        hidden_size=2,
+        num_semantic_tokens=8,
+        semantic_sequence_length=2,
+        pad_token_id=0,
+    )
+    padding_mask = torch.tensor([[False, False, True, True]], dtype=torch.bool)
+
+    semantic_mask = model._pool_semantic_padding_mask(padding_mask)
+
+    assert torch.equal(semantic_mask, torch.tensor([[False, True]]))
