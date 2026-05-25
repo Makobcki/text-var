@@ -35,3 +35,43 @@ def test_encode_sentence_preserves_semantic_sequence_length() -> None:
     semantic_idx, _ = model.encode_sentence(tokens, padding_mask=tokens.eq(0))
 
     assert semantic_idx.shape == (1, 4)
+
+
+def test_position_ids_raise_for_sequences_longer_than_limit() -> None:
+    model = SemanticTextVQVAE(
+        vocab_size=32,
+        hidden_size=8,
+        num_semantic_tokens=16,
+        max_position_embeddings=4,
+    )
+
+    try:
+        _ = model._position_ids(seq_len=5, device=torch.device("cpu"))
+    except ValueError as exc:
+        assert "max_position_embeddings" in str(exc)
+        return
+
+    raise AssertionError("Expected ValueError for sequence length overflow.")
+
+
+def test_decode_from_semantic_indices_respects_position_limit() -> None:
+    model = SemanticTextVQVAE(
+        vocab_size=64,
+        hidden_size=16,
+        num_semantic_tokens=32,
+        max_position_embeddings=3,
+    ).eval()
+    semantic_indices = torch.tensor([[1]], dtype=torch.long)
+
+    try:
+        _ = model.decode_from_semantic_indices(
+            semantic_indices,
+            max_length=5,
+            bos_token_id=1,
+            top_p=1.0,
+        )
+    except ValueError as exc:
+        assert "max_position_embeddings" in str(exc)
+        return
+
+    raise AssertionError("Expected ValueError for generation beyond position limit.")
