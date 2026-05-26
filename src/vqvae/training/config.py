@@ -53,6 +53,14 @@ class VQVAETrainConfig:
     use_torch_compile: bool = False
     log_every_steps: int = 10
     verbose: bool = False
+    semantic_pad_token_id: int = 0
+    use_triton_ema: bool = False
+    use_turboquant_kv: bool = False
+    turboquant_key_bits: int = 4
+    turboquant_value_bits: int = 4
+    turboquant_qjl_residual_scale: float = 0.5
+    gradient_checkpointing: bool = False
+    use_rotary_embeddings: bool = True
 
 
 def _require_str(data: dict[str, Any], key: str) -> str:
@@ -119,4 +127,12 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         use_torch_compile=bool(data.get('use_torch_compile', False)),
         log_every_steps=int(data.get('log_every_steps', 10)),
         verbose=bool(data.get('verbose', False)),
+        semantic_pad_token_id=int(data.get('semantic_pad_token_id', 0)),
+        use_triton_ema=bool(data.get('use_triton_ema', False)),
+        use_turboquant_kv=bool(data.get('use_turboquant_kv', False)),
+        turboquant_key_bits=int(data.get('turboquant_key_bits', 4)),
+        turboquant_value_bits=int(data.get('turboquant_value_bits', 4)),
+        turboquant_qjl_residual_scale=float(data.get('turboquant_qjl_residual_scale', 0.5)),
+        gradient_checkpointing=bool(data.get('gradient_checkpointing', False)),
+        use_rotary_embeddings=bool(data.get('use_rotary_embeddings', True)),
     )
