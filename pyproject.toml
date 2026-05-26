@@ -17,6 +17,24 @@ dependencies = [
   "transformers>=4.44",
   "fastapi>=0.112",
   "uvicorn>=0.30",
+  "tokenizers>=0.19",
+  "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+accelerate = [
+  "bitsandbytes>=0.43; platform_system == 'Linux'",
+  "flash-attn>=2.5; platform_system == 'Linux'",
+]
+train = [
+  "wandb>=0.15",
+]
+data = [
+  "pyarrow>=14.0",
+  # "cudf" # Install via RAPIDS for GPU accelerated JSONL reading
+]
+test = [
+  "pytest>=7.0",
 ]
 
 [tool.setuptools.packages.find]
