@@ -73,16 +73,27 @@ def main():
                 print(f"Оптимизация: используем cuDF (CUDA) для батчевой загрузки {filepath}...")
                 def _cudf_iter():
                     count = 0
-                    for chunk_df in cudf.read_json(filepath, lines=True, chunksize=10000):
-                        col = "content" if "content" in chunk_df.columns else "text"
-                        # to_arrow().to_pylist() быстро перегоняет SoA колонку в список
-                        batch = chunk_df[col].dropna().to_arrow().to_pylist()
-                        for text in batch:
-                            if text:
-                                yield str(text)
-                                count += 1
-                                if max_samples and count >= max_samples:
-                                    return
+                    file_size = os.path.getsize(filepath)
+                    chunk_bytes = 250 * 1024 * 1024  # Читаем чанками по 250MB
+                    
+                    for offset in range(0, file_size, chunk_bytes):
+                        try:
+                            # Используем byte_range вместо chunksize, так как libcudf поддерживает чтение по байтам
+                            chunk_df = cudf.read_json(filepath, lines=True, byte_range=(offset, chunk_bytes))
+                            if chunk_df.empty:
+                                continue
+                            
+                            col = "content" if "content" in chunk_df.columns else "text"
+                            batch = chunk_df[col].dropna().to_arrow().to_pylist()
+                            for text in batch:
+                                if text:
+                                    yield str(text)
+                                    count += 1
+                                    if max_samples and count >= max_samples:
+                                        return
+                        except Exception as e:
+                            print(f"Предупреждение: ошибка чтения чанка cuDF: {e}")
+                            break
                 return _cudf_iter()
             except ImportError:
                 pass
@@ -92,12 +103,11 @@ def main():
             # 2. Используем стриминг батчами через Pandas (CPU)
             try:
                 import pandas as pd
-
                 print(f"Используем pandas для батчевого стриминга {filepath}...")
-
                 def _pandas_iter():
                     count = 0
-                    for chunk_df in pd.read_json(filepath, lines=True, chunksize=200000):
+                    # Увеличен батч для современных CPU
+                    for chunk_df in pd.read_json(filepath, lines=True, chunksize=100000):
                         col = "content" if "content" in chunk_df.columns else "text"
                         for text in chunk_df[col].dropna().astype(str):
                             if text:
@@ -105,12 +115,10 @@ def main():
                                 count += 1
                                 if max_samples and count >= max_samples:
                                     return
-
                 return _pandas_iter()
             except ImportError:
                 print(f"Используем стриминг через стандартный json для загрузки {filepath}...")
                 import json
-
                 def _streaming_iter():
                     count = 0
                     with open(filepath, "r", encoding="utf-8") as f:
@@ -124,7 +132,6 @@ def main():
                                 count += 1
                                 if max_samples and count >= max_samples:
                                     return
-
                 return _streaming_iter()
 
         tokenizer = trainer.train_from_iterator(
