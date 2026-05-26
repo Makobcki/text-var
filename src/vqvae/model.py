@@ -142,7 +142,7 @@ class SemanticTextVQVAE(nn.Module):
         self.gradient_checkpointing = bool(gradient_checkpointing)
         self.use_rotary_embeddings = bool(use_rotary_embeddings)
 
-        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=self.pad_token_id)
         self.pos_embedding = nn.Embedding(self.max_position_embeddings, hidden_size)
 
         self.encoder = SDPAEncoder(
@@ -158,7 +158,7 @@ class SemanticTextVQVAE(nn.Module):
             num_embeddings=num_semantic_tokens, embedding_dim=hidden_size
         )
 
-        # TASK-4: Компоненты декодера для деквантования и автоэнкодинга
+        # Компоненты декодера для деквантования и автоэнкодинга
         self.decoder_layers = nn.ModuleList(
             [
                 SDPADecoderLayer(hidden=hidden_size, num_heads=8, mlp_ratio=4.0, dropout=0.1)
@@ -288,17 +288,14 @@ class SemanticTextVQVAE(nn.Module):
         ).transpose(1, 2)
         if int(pooled.shape[1]) == target_len:
             return pooled
-        pooled_channel_first = pooled.transpose(1, 2).contiguous()
-        return F.adaptive_avg_pool1d(pooled_channel_first, target_len).transpose(1, 2)
+        return F.adaptive_avg_pool1d(pooled.transpose(1, 2), target_len).transpose(1, 2)
 
     def _pool_semantic_tokens(
-        self,
-        encoded: torch.Tensor,
-        padding_mask: torch.Tensor | None = None,
+        self, encoded: torch.Tensor, padding_mask: torch.Tensor | None
     ) -> torch.Tensor:
-        """Downsample encoder states to semantic token sequence length.
+        """Pool encoded features into a fixed-length semantic representation.
 
-        Uses local average pooling with stride to preserve token-level locality
+        If a padding mask is provided, padded tokens are masked out (zeroed)
         before optional adaptive resampling to the configured semantic length.
 
         Args:
@@ -445,11 +442,11 @@ class SemanticTextVQVAE(nn.Module):
 
         return generated
 
-    # TASK-4: Реализация сквозного forward-цикла восстановления с расчетом лосса
     def forward(
         self, bpe_tokens: torch.Tensor, padding_mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         padding_mask = self._resolve_padding_mask(bpe_tokens, padding_mask)
+
         # --- 1. ЭТАП ЭНКОДИНГА ---
         positions = self._position_ids(bpe_tokens.size(1), bpe_tokens.device)
         x = self.embedding(bpe_tokens) + self.pos_embedding(positions)
@@ -463,36 +460,42 @@ class SemanticTextVQVAE(nn.Module):
         quantized, vq_loss, _ = self.quantizer(semantic_inputs)
 
         # --- 3. ЭТАП ДЕКОДИРОВАНИЯ (Causal AR Reconstruction) ---
-        # Сдвигаем токены для входа декодера, чтобы исключить читерство через self-attention
         tgt_tokens = bpe_tokens[:, :-1]
         tgt_positions = positions[:, :-1]
         tgt_emb = self.embedding(tgt_tokens) + self.pos_embedding(tgt_positions)
 
-        # Превращаем квантованный вектор предложения в контекст (memory) для Cross-Attention
         memory = self._apply_semantic_padding_mask(quantized, semantic_padding_mask)
 
-        # Восстановление скрытых представлений и проекция в вокабуляр
         decoded, _ = self._run_decoder(
             tgt_emb=tgt_emb,
             memory=memory,
             past_key_values=None,
             incremental=False,
         )
-        logits = self.lm_head(decoded)
 
-        # --- 4. РАСЧЕТ РЕКОНСТРУКЦИИ (Reconstruction Loss) ---
-        # Таргеты сдвинуты на +1 относительно входов декодера
-        recon_targets = bpe_tokens[:, 1:]
+        # --- 4. РАСЧЕТ РЕКОНСТРУКЦИИ (Active Token Slicing) ---
+        # Находим полезные (не padding) токены
+        valid_mask = ~padding_mask[:, :-1]
 
-        loss_mask = padding_mask[:, 1:]
-        masked_targets = recon_targets.masked_fill(loss_mask, int(self.pad_token_id))
-        recon_loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            masked_targets.reshape(-1),
-            ignore_index=int(self.pad_token_id),
-            reduction="mean",
-        )
+        # ВЫРЕЗАЕМ мусор ДО проекции! (Экономия до 60% VRAM и TFLOPS)
+        active_decoded = decoded[valid_mask]
+        active_logits = self.lm_head(active_decoded)
 
-        # Итоговый лосс для pre-train этапа
+        # Берем только правильные таргеты
+        active_targets = bpe_tokens[:, 1:][valid_mask]
+
+        # Лосс считается только по активным токенам
+        recon_loss = F.cross_entropy(active_logits, active_targets, reduction="mean")
         total_loss = recon_loss + vq_loss
+
+        # Рассеиваем логиты обратно в полную форму (нулями)
+        logits = torch.zeros(
+            bpe_tokens.size(0),
+            bpe_tokens.size(1) - 1,
+            self.vocab_size,
+            device=active_logits.device,
+            dtype=active_logits.dtype,
+        )
+        logits[valid_mask] = active_logits
+
         return logits, total_loss
