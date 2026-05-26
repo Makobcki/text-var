@@ -13,6 +13,13 @@ def test_cli_parses_runtime_optimization_flags() -> None:
         "--dataloader-prefetch-factor", "3",
         "--amp-dtype", "fp16",
         "--use-torch-compile",
+        "--use-triton-ema",
+        "--use-turboquant-kv",
+        "--turboquant-key-bits", "3",
+        "--turboquant-value-bits", "5",
+        "--turboquant-qjl-residual-scale", "0.2",
+        "--gradient-checkpointing",
+        "--disable-rotary-embeddings",
         "--log-every-steps", "25",
     ])
 
@@ -20,6 +27,13 @@ def test_cli_parses_runtime_optimization_flags() -> None:
     assert args.dataloader_prefetch_factor == 3
     assert args.amp_dtype == "fp16"
     assert args.use_torch_compile is True
+    assert args.use_triton_ema is True
+    assert args.use_turboquant_kv is True
+    assert args.turboquant_key_bits == 3
+    assert args.turboquant_value_bits == 5
+    assert args.turboquant_qjl_residual_scale == 0.2
+    assert args.gradient_checkpointing is True
+    assert args.disable_rotary_embeddings is True
     assert args.log_every_steps == 25
     assert args.verbose is False
 
@@ -42,6 +56,14 @@ def test_config_loads_runtime_optimization_options(tmp_path: Path) -> None:
   "amp_dtype": "none",
   "use_torch_compile": true,
   "log_every_steps": 7
+  ,"semantic_pad_token_id": 7
+  ,"use_triton_ema": true
+  ,"use_turboquant_kv": true
+  ,"turboquant_key_bits": 3
+  ,"turboquant_value_bits": 5
+  ,"turboquant_qjl_residual_scale": 0.2
+  ,"gradient_checkpointing": true
+  ,"use_rotary_embeddings": false
 }
 """.strip(),
         encoding="utf-8",
@@ -54,4 +76,12 @@ def test_config_loads_runtime_optimization_options(tmp_path: Path) -> None:
     assert cfg.amp_dtype == "none"
     assert cfg.use_torch_compile is True
     assert cfg.log_every_steps == 7
+    assert cfg.semantic_pad_token_id == 7
+    assert cfg.use_triton_ema is True
+    assert cfg.use_turboquant_kv is True
+    assert cfg.turboquant_key_bits == 3
+    assert cfg.turboquant_value_bits == 5
+    assert cfg.turboquant_qjl_residual_scale == 0.2
+    assert cfg.gradient_checkpointing is True
+    assert cfg.use_rotary_embeddings is False
     assert cfg.verbose is False
