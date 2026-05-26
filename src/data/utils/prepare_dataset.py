@@ -97,6 +97,13 @@ def process_single_line(
 
     tokenizer = _get_tokenizer(tokenizer_name, use_fast)
     token_ids = tokenizer.encode(text, add_special_tokens=False)
+    
+    if eos_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            eos_token_id = tokenizer.eos_token_id
+        else:
+            eos_token_id = 3 # fallback for custom tokenizer
+
 
     if not token_ids:
         return {
@@ -160,7 +167,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--level-lengths", type=int, nargs="+", default=(32, 128, 1024))
     parser.add_argument("--codebook-dim", type=int, default=256)
     parser.add_argument("--tokenizer-name", type=str, default="bert-base-uncased")
-    parser.add_argument("--eos-token-id", type=int, default=2)
+    parser.add_argument("--eos-token-id", type=int, default=None, help="If not provided, uses tokenizer.eos_token_id")
     parser.add_argument("--slow-tokenizer", action="store_true", help="Use python tokenizer instead of fast backend.")
     parser.add_argument(
         "--num-workers",
