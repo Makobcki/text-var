@@ -49,18 +49,48 @@ def main():
         print(f"Найдено .jsonl датасет: {args.data}")
         print(f"Начинается обучение токенизатора из JSONL (vocab_size={args.vocab_size})...")
         
-        def jsonl_iterator(filepath):
-            import json
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    payload = json.loads(line)
-                    text = str(payload.get("content", payload.get("text", ""))).strip()
-                    if text:
-                        yield text
+        def get_jsonl_iterator(filepath):
+            # 1. Попытка использовать CUDA (cuDF) для GPU-ускоренного парсинга JSONL (SoA)
+            try:
+                import cudf
+                print(f"Оптимизация: используем cuDF (CUDA) для загрузки {filepath}...")
+                df = cudf.read_json(filepath, lines=True)
+                col = "content" if "content" in df.columns else "text"
+                # to_arrow().to_pylist() эффективно конвертирует SoA в список строк
+                return df[col].dropna().to_arrow().to_pylist()
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"cuDF fallback (ошибка: {e}). Переход к CPU...")
 
-        tokenizer = trainer.train_from_iterator(jsonl_iterator(args.data))
+            # 2. Попытка использовать PyArrow (CPU SoA)
+            try:
+                from pyarrow import json as pa_json
+                import pyarrow.compute as pc
+                print(f"Оптимизация: используем PyArrow (SoA) для загрузки {filepath}...")
+                table = pa_json.read_json(filepath)
+                col = "content" if "content" in table.column_names else "text"
+                return pc.drop_null(table[col]).to_pylist()
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"PyArrow fallback (ошибка: {e}). Переход к стандартному json...")
+
+            # 3. Фолбек на стандартный потоковый генератор
+            print(f"Используем стандартный json (AoS) для загрузки {filepath}...")
+            import json
+            def _fallback_iter():
+                with open(filepath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        payload = json.loads(line)
+                        text = str(payload.get("content", payload.get("text", ""))).strip()
+                        if text:
+                            yield text
+            return _fallback_iter()
+
+        tokenizer = trainer.train_from_iterator(get_jsonl_iterator(args.data))
     else:
         print(f"Ошибка: Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")
         return
