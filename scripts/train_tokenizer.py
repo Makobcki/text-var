@@ -8,10 +8,10 @@ from src.tokenizer.trainer import BPETokenizerTrainer
 def parse_args():
     parser = argparse.ArgumentParser(description="Обучение BPE токенизатора для text-var")
     parser.add_argument(
-        "--data_dir",
+        "--data",
         type=str,
         required=True,
-        help="Путь к директории с текстовыми файлами для обучения (.txt)",
+        help="Путь к директории с .txt файлами или к .jsonl датасету для обучения",
     )
     parser.add_argument(
         "--save_dir",
@@ -32,19 +32,38 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Сбор всех текстовых файлов
-    files = glob.glob(os.path.join(args.data_dir, "**/*.txt"), recursive=True)
-    if not files:
-        print(f"Ошибка: В директории {args.data_dir} не найдено .txt файлов.")
-        return
-
-    print(f"Найдено файлов для обучения: {len(files)}")
-    print(f"Начинается обучение токенизатора (vocab_size={args.vocab_size})...")
-
     trainer = BPETokenizerTrainer(vocab_size=args.vocab_size, min_frequency=args.min_frequency)
 
-    # Запуск процесса
-    tokenizer = trainer.train_from_files(files)
+    if os.path.isdir(args.data):
+        # Сбор всех текстовых файлов
+        files = glob.glob(os.path.join(args.data, "**/*.txt"), recursive=True)
+        if not files:
+            print(f"Ошибка: В директории {args.data} не найдено .txt файлов.")
+            return
+
+        print(f"Найдено файлов для обучения: {len(files)}")
+        print(f"Начинается обучение токенизатора из текстовых файлов (vocab_size={args.vocab_size})...")
+        tokenizer = trainer.train_from_files(files)
+        
+    elif os.path.isfile(args.data) and args.data.endswith(".jsonl"):
+        print(f"Найдено .jsonl датасет: {args.data}")
+        print(f"Начинается обучение токенизатора из JSONL (vocab_size={args.vocab_size})...")
+        
+        def jsonl_iterator(filepath):
+            import json
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    text = str(payload.get("content", payload.get("text", ""))).strip()
+                    if text:
+                        yield text
+
+        tokenizer = trainer.train_from_iterator(jsonl_iterator(args.data))
+    else:
+        print(f"Ошибка: Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")
+        return
 
     # Сохранение (создаст tokenizer.json, tokenizer_config.json, special_tokens_map.json)
     os.makedirs(args.save_dir, exist_ok=True)
