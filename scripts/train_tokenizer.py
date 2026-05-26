@@ -72,28 +72,33 @@ def main():
                 import cudf
                 print(f"Оптимизация: используем cuDF (CUDA) для батчевой загрузки {filepath}...")
                 def _cudf_iter():
+                    import io
                     count = 0
-                    file_size = os.path.getsize(filepath)
-                    chunk_bytes = 250 * 1024 * 1024  # Читаем чанками по 250MB
-                    
-                    for offset in range(0, file_size, chunk_bytes):
-                        try:
-                            # Используем byte_range вместо chunksize, так как libcudf поддерживает чтение по байтам
-                            chunk_df = cudf.read_json(filepath, lines=True, byte_range=(offset, chunk_bytes))
-                            if chunk_df.empty:
-                                continue
+                    chunk_bytes = 250 * 1024 * 1024  # 250MB
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        while True:
+                            # Читаем пачку строк (до ~250МБ). Чтение идет целыми строками.
+                            lines = f.readlines(chunk_bytes)
+                            if not lines:
+                                break
                             
-                            col = "content" if "content" in chunk_df.columns else "text"
-                            batch = chunk_df[col].dropna().to_arrow().to_pylist()
-                            for text in batch:
-                                if text:
-                                    yield str(text)
-                                    count += 1
-                                    if max_samples and count >= max_samples:
-                                        return
-                        except Exception as e:
-                            print(f"Предупреждение: ошибка чтения чанка cuDF: {e}")
-                            break
+                            try:
+                                # Отдаем текст в cuDF через StringIO (обход бага libcudf с byte_range)
+                                chunk_df = cudf.read_json(io.StringIO("".join(lines)), lines=True)
+                                if chunk_df.empty:
+                                    continue
+                                
+                                col = "content" if "content" in chunk_df.columns else "text"
+                                batch = chunk_df[col].dropna().to_arrow().to_pylist()
+                                for text in batch:
+                                    if text:
+                                        yield str(text)
+                                        count += 1
+                                        if max_samples and count >= max_samples:
+                                            return
+                            except Exception as e:
+                                print(f"Предупреждение: ошибка чтения чанка cuDF: {e}")
+                                break
                 return _cudf_iter()
             except ImportError:
                 pass
