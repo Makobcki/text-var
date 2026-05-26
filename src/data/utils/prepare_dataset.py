@@ -203,64 +203,74 @@ def main(argv: list[str] | None = None) -> None:
     with open(args.output_dir / "metadata.json", "w", encoding="utf-8") as fM:
         json.dump(metadata.to_dict(), fM, ensure_ascii=False, indent=2)
 
+    import signal
+    import sys
+
+    def _handle_sigterm(signum, frame):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    def _init_worker():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     current_batch: list[dict[str, object]] = []
     batch_index = 0
     total_saved_docs = 0
 
-    with Pool(processes=num_workers) as pool:
-        with open(args.input, "r", encoding="utf-8") as f:
+    try:
+        with Pool(processes=num_workers, initializer=_init_worker) as pool:
+            with open(args.input, "r", encoding="utf-8") as f:
 
-            def argument_generator():
-                for idx, line in enumerate(f):
-                    yield (
-                        line,
-                        idx,
-                        metadata.level_lengths,
-                        metadata.level_vocab_sizes,
-                        args.tokenizer_name,
-                        not args.slow_tokenizer,
-                        args.eos_token_id,
-                    )
+                def argument_generator():
+                    for idx, line in enumerate(f):
+                        yield (
+                            line,
+                            idx,
+                            metadata.level_lengths,
+                            metadata.level_vocab_sizes,
+                            args.tokenizer_name,
+                            not args.slow_tokenizer,
+                            args.eos_token_id,
+                        )
 
-            pbar = tqdm(
-                total=total_bytes,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                desc="Токенизация",
-            )
+                pbar = tqdm(
+                    total=total_bytes,
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc="Токенизация",
+                )
 
-            # Использование pool.imap гарантирует сохранение порядка (индексы идут строго вверх)
-            # Благодаря этому нам больше не нужна финальная тяжелая сортировка .sort()
-            for result in pool.imap(process_single_line, argument_generator(), chunksize=256):
-                pbar.update(result["bytes_processed"])
+                for result in pool.imap(process_single_line, argument_generator(), chunksize=256):
+                    pbar.update(result["bytes_processed"])
 
-                if result["tokens"] is not None:
-                    current_batch.append(
-                        {
-                            "id": result["id"],
-                            "index": result["index"],
-                            "tokens": result["tokens"],
-                        }
-                    )
-                    total_saved_docs += 1
+                    if result["tokens"] is not None:
+                        current_batch.append(
+                            {
+                                "id": result["id"],
+                                "index": result["index"],
+                                "tokens": result["tokens"],
+                            }
+                        )
+                        total_saved_docs += 1
 
-                # Достигли лимита батча — сбрасываем на диск и полностью чистим память
-                if len(current_batch) >= args.batch_size:
+                    if len(current_batch) >= args.batch_size:
+                        chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
+                        _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
+
+                        current_batch = []
+                        batch_index += 1
+
+                if current_batch:
                     chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
                     _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
+                    del current_batch
 
-                    # Явное освобождение памяти
-                    current_batch = []
-                    batch_index += 1
+                pbar.close()
 
-            # Сбрасываем остатки данных
-            if current_batch:
-                chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
-                _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
-                del current_batch
-
-            pbar.close()
+    except KeyboardInterrupt:
+        print("\n[!] Процесс прерван сигналом SIGINT/SIGTERM. Остановка пула воркеров...")
+        sys.exit(1)
 
     if total_saved_docs == 0:
         raise ValueError("Input dataset is empty or contains no valid records.")

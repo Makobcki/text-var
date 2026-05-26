@@ -1,8 +1,17 @@
 import argparse
 import glob
 import os
+import signal
+import sys
 
 from src.tokenizer.trainer import BPETokenizerTrainer
+
+def _signal_handler(sig, frame):
+    print(f"\n[!] Скрипт прерван сигналом {sig}. Принудительный выход...")
+    os._exit(1)
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
 
 
 def parse_args():
