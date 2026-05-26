@@ -67,7 +67,7 @@ class BPETokenizerTrainer:
 
         return fast_tokenizer
 
-    def train_from_iterator(self, iterator) -> PreTrainedTokenizerFast:
+    def train_from_iterator(self, iterator, length: Optional[int] = None) -> PreTrainedTokenizerFast:
         """
         Альтернативный метод обучения из Python-генератора (полезно для HuggingFace Datasets).
         """
@@ -78,7 +78,7 @@ class BPETokenizerTrainer:
             show_progress=True,
         )
 
-        self.tokenizer.train_from_iterator(iterator, trainer=trainer)
+        self.tokenizer.train_from_iterator(iterator, trainer=trainer, length=length)
         self.tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
 
         return PreTrainedTokenizerFast(

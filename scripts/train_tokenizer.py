@@ -65,60 +65,43 @@ def main():
         print(f"Начинается обучение токенизатора из JSONL (vocab_size={args.vocab_size})...")
         
         def get_jsonl_iterator(filepath, max_samples=None):
-            file_size_gb = os.path.getsize(filepath) / (1024 ** 3)
-            use_in_memory = file_size_gb < 2.0  # Только для файлов < 2GB
-            
-            if use_in_memory:
-                # 1. Попытка использовать CUDA (cuDF) для GPU-ускоренного парсинга JSONL (SoA)
-                try:
-                    import cudf
-                    print(f"Оптимизация: используем cuDF (CUDA) для загрузки {filepath}...")
-                    df = cudf.read_json(filepath, lines=True)
-                    col = "content" if "content" in df.columns else "text"
-                    # to_arrow().to_pylist() эффективно конвертирует SoA в список строк
-                    data = df[col].dropna().to_arrow().to_pylist()
-                    return data[:max_samples] if max_samples else data
-                except ImportError:
-                    pass
-                except Exception as e:
-                    print(f"cuDF fallback (ошибка: {e}). Переход к CPU...")
+            # Используем стриминг батчами для экономии памяти (AoS или Pandas)
+            try:
+                import pandas as pd
+                print(f"Используем pandas для батчевого стриминга {filepath}...")
+                def _pandas_iter():
+                    count = 0
+                    for chunk_df in pd.read_json(filepath, lines=True, chunksize=10000):
+                        col = "content" if "content" in chunk_df.columns else "text"
+                        for text in chunk_df[col].dropna().astype(str):
+                            if text:
+                                yield text
+                                count += 1
+                                if max_samples and count >= max_samples:
+                                    return
+                return _pandas_iter()
+            except ImportError:
+                print(f"Используем стриминг через стандартный json для загрузки {filepath}...")
+                import json
+                def _streaming_iter():
+                    count = 0
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        for line in f:
+                            if not line.strip():
+                                continue
+                            payload = json.loads(line)
+                            text = str(payload.get("content", payload.get("text", ""))).strip()
+                            if text:
+                                yield text
+                                count += 1
+                                if max_samples and count >= max_samples:
+                                    return
+                return _streaming_iter()
 
-                # 2. Попытка использовать PyArrow (CPU SoA)
-                try:
-                    from pyarrow import json as pa_json
-                    import pyarrow.compute as pc
-                    print(f"Оптимизация: используем PyArrow (SoA) для загрузки {filepath}...")
-                    read_options = pa_json.ReadOptions(block_size=256 * 1024 * 1024)
-                    table = pa_json.read_json(filepath, read_options=read_options)
-                    col = "content" if "content" in table.column_names else "text"
-                    data = pc.drop_null(table[col]).to_pylist()
-                    return data[:max_samples] if max_samples else data
-                except ImportError:
-                    pass
-                except Exception as e:
-                    print(f"PyArrow fallback (ошибка: {e}). Переход к стандартному json...")
-            else:
-                print(f"Файл {filepath} слишком большой ({file_size_gb:.1f} GB). Отключаем in-memory SoA загрузку во избежание OOM.")
-
-            # 3. Фолбек на потоковый генератор (AoS), который не съедает RAM
-            print(f"Используем стриминг через стандартный json для загрузки {filepath}...")
-            import json
-            def _streaming_iter():
-                count = 0
-                with open(filepath, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-                        payload = json.loads(line)
-                        text = str(payload.get("content", payload.get("text", ""))).strip()
-                        if text:
-                            yield text
-                            count += 1
-                            if max_samples and count >= max_samples:
-                                break
-            return _streaming_iter()
-
-        tokenizer = trainer.train_from_iterator(get_jsonl_iterator(args.data, args.max_samples))
+        tokenizer = trainer.train_from_iterator(
+            get_jsonl_iterator(args.data, args.max_samples),
+            length=args.max_samples
+        )
     else:
         print(f"Ошибка: Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")
         return
