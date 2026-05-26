@@ -49,8 +49,9 @@ class VQVAETrainConfig:
     gradient_accumulation_steps: int = 1
     dataloader_num_workers: int = 4
     dataloader_prefetch_factor: int = 2
-    amp_dtype: str = "bf16"
+    pin_memory: bool = True
     use_torch_compile: bool = False
+    compile_mode: str = "default"
     log_every_steps: int = 10
     verbose: bool = False
     semantic_pad_token_id: int = 0
@@ -123,8 +124,9 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         gradient_accumulation_steps=int(data.get('gradient_accumulation_steps', 1)),
         dataloader_num_workers=int(data.get('dataloader_num_workers', 4)),
         dataloader_prefetch_factor=int(data.get('dataloader_prefetch_factor', 2)),
-        amp_dtype=str(data.get('amp_dtype', 'bf16')),
+        pin_memory=bool(data.get('pin_memory', True)),
         use_torch_compile=bool(data.get('use_torch_compile', False)),
+        compile_mode=str(data.get('compile_mode', 'default')),
         log_every_steps=int(data.get('log_every_steps', 10)),
         verbose=bool(data.get('verbose', False)),
         semantic_pad_token_id=int(data.get('semantic_pad_token_id', 0)),

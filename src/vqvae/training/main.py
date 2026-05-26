@@ -106,8 +106,9 @@ def run_training(
     gradient_accumulation_steps: int = 1,
     dataloader_num_workers: int = 4,
     dataloader_prefetch_factor: int = 2,
-    amp_dtype_name: str = "bf16",
+    pin_memory: bool = True,
     use_torch_compile: bool = False,
+    compile_mode: str = "default",
     use_triton_ema: bool = False,
     use_turboquant_kv: bool = False,
     turboquant_key_bits: int = 4,
@@ -158,24 +159,15 @@ def run_training(
         gradient_checkpointing=gradient_checkpointing,
         use_rotary_embeddings=use_rotary_embeddings,
     ).to(dev)
-    amp_dtype_lookup: dict[str, torch.dtype | None] = {
-        "bf16": torch.bfloat16,
-        "fp16": torch.float16,
-        "none": None,
-    }
-    if amp_dtype_name not in amp_dtype_lookup:
-        raise ValueError("amp_dtype_name must be one of: bf16, fp16, none.")
-    amp_dtype = amp_dtype_lookup[amp_dtype_name]
-    amp_enabled = dev.type == "cuda" and amp_dtype is not None
+    amp_dtype = torch.bfloat16
+    amp_enabled = dev.type == "cuda"
 
     if use_torch_compile and hasattr(torch, "compile"):
-        model = torch.compile(base_model)
+        model = torch.compile(base_model, mode=compile_mode)
     else:
         model = base_model
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scaler = torch.amp.GradScaler(enabled=amp_enabled and amp_dtype is torch.float16)
-
     ds = MultiscaleTokenChunkIterableDataset(
         chunk_paths=chunk_paths,
         metadata=metadata,
@@ -228,15 +220,13 @@ def run_training(
                     forward_time = time.perf_counter() - forward_start
                     scaled_loss = loss / gradient_accumulation_steps
                     backward_start = time.perf_counter()
-                    scaler.scale(scaled_loss).backward()
+                    scaled_loss.backward()
                     backward_time = time.perf_counter() - backward_start
                     micro_step += 1
                     if micro_step % gradient_accumulation_steps == 0:
-                        scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         optimizer_start = time.perf_counter()
-                        scaler.step(optimizer)
-                        scaler.update()
+                        optimizer.step()
                         optimizer_time = time.perf_counter() - optimizer_start
                         optimizer.zero_grad(set_to_none=True)
                         step += 1
@@ -264,11 +254,9 @@ def run_training(
                 raise RuntimeError("No valid token entries were loaded from token cache.")
 
             if micro_step % gradient_accumulation_steps != 0:
-                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer_start = time.perf_counter()
-                scaler.step(optimizer)
-                scaler.update()
+                optimizer.step()
                 optimizer_time = time.perf_counter() - optimizer_start
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
@@ -355,8 +343,9 @@ def main() -> None:
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             dataloader_num_workers=args.dataloader_num_workers,
             dataloader_prefetch_factor=args.dataloader_prefetch_factor,
-            amp_dtype=args.amp_dtype,
+            pin_memory=True,
             use_torch_compile=args.use_torch_compile,
+            compile_mode="default",
             use_triton_ema=args.use_triton_ema,
             use_turboquant_kv=args.use_turboquant_kv,
             turboquant_key_bits=args.turboquant_key_bits,
@@ -386,8 +375,9 @@ def main() -> None:
             gradient_accumulation_steps=cfg.gradient_accumulation_steps,
             dataloader_num_workers=cfg.dataloader_num_workers,
             dataloader_prefetch_factor=cfg.dataloader_prefetch_factor,
-            amp_dtype_name=cfg.amp_dtype,
+            pin_memory=cfg.pin_memory,
             use_torch_compile=cfg.use_torch_compile,
+            compile_mode=cfg.compile_mode,
             use_triton_ema=cfg.use_triton_ema,
             use_turboquant_kv=cfg.use_turboquant_kv,
             turboquant_key_bits=cfg.turboquant_key_bits,

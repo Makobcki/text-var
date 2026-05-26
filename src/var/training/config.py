@@ -31,10 +31,11 @@ class TrainConfig:
     corruption_span_max: int = 64
     masked_loss_weight: float = 0.85
     amp_enabled: bool = True
-    amp_dtype: Literal["bf16", "fp16"] = "bf16"
     compile_enabled: bool = False
+    compile_mode: str = "default"
     pin_memory: bool = True
     train_num_workers: int = 4
+    train_prefetch_factor: int = 2
     val_num_workers: int = 2
     grad_accum_steps: int = 1
     flash_cross_entropy: bool = True
@@ -123,10 +124,11 @@ def load_train_config(path: Path) -> TrainConfig:
         corruption_span_max=int(data.get("corruption_span_max", 64)),
         masked_loss_weight=float(data.get("masked_loss_weight", 0.85)),
         amp_enabled=bool(data.get("amp_enabled", True)),
-        amp_dtype=str(data.get("amp_dtype", "bf16")).lower(),
         compile_enabled=bool(data.get("compile_enabled", False)),
+        compile_mode=str(data.get("compile_mode", "default")),
         pin_memory=bool(data.get("pin_memory", True)),
         train_num_workers=max(0, int(data.get("train_num_workers", 4))),
+        train_prefetch_factor=max(1, int(data.get("train_prefetch_factor", 2))),
         val_num_workers=max(0, int(data.get("val_num_workers", 2))),
         grad_accum_steps=max(1, int(data.get("grad_accum_steps", 1))),
         flash_cross_entropy=bool(data.get("flash_cross_entropy", True)),

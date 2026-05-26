@@ -72,14 +72,6 @@ def _collate_tokens(batch: list[dict[str, Any]]) -> list[torch.Tensor]:
     ]
 
 
-def _resolve_amp_dtype(name: str) -> torch.dtype:
-    if name == "bf16":
-        return torch.bfloat16
-    if name == "fp16":
-        return torch.float16
-    raise ValueError(f"Unsupported AMP dtype: {name}")
-
-
 def _apply_unconditional_prefix_dropout(
     moved_tokens: list[torch.Tensor],
     *,
@@ -221,7 +213,7 @@ def evaluate(
         moved_tokens = [t.to(device, non_blocking=non_blocking) for t in batch]
         with torch.autocast(
             device_type=device.type,
-            dtype=_resolve_amp_dtype(cfg.amp_dtype),
+            dtype=torch.bfloat16,
             enabled=bool(cfg.amp_enabled),
         ):
             loss = multiscale_next_scale_cross_entropy(
@@ -247,8 +239,8 @@ def run_training(cfg: TrainConfig) -> Path:
     model = VARTransformer(cfg.model).to(device)
     if bool(cfg.compile_enabled):
         if hasattr(torch, "compile"):
-            model = torch.compile(model)
-            print("[TRAIN] torch.compile enabled.")
+            model = torch.compile(model, mode=cfg.compile_mode)
+            print(f"[TRAIN] torch.compile enabled (mode={cfg.compile_mode}).")
         else:
             print("[TRAIN] torch.compile requested but unavailable in this PyTorch build.")
 
@@ -302,6 +294,7 @@ def run_training(cfg: TrainConfig) -> Path:
         pin_memory=bool(cfg.pin_memory),
         num_workers=cfg.train_num_workers,
         persistent_workers=cfg.train_num_workers > 0,
+        prefetch_factor=cfg.train_prefetch_factor if cfg.train_num_workers > 0 else None,
     )
 
     val_dataloader = None
@@ -334,17 +327,14 @@ def run_training(cfg: TrainConfig) -> Path:
                 "learning_rate": cfg.learning_rate,
                 "batch_size": cfg.batch_size,
                 "max_steps": cfg.max_steps,
-                "amp_dtype": cfg.amp_dtype,
+                "amp_dtype": "bf16",
             },
         )
         print(f"[TRAIN] wandb enabled: project={cfg.wandb_project} run={wandb_run.name}")
 
-    amp_dtype = _resolve_amp_dtype(cfg.amp_dtype)
-    amp_enabled = bool(cfg.amp_enabled) and _is_amp_available(device, amp_dtype)
-    if bool(cfg.amp_enabled) and not amp_enabled:
-        print("[TRAIN] AMP requested but unavailable on selected device; fallback to fp32.")
+    amp_dtype = torch.bfloat16
+    amp_enabled = bool(cfg.amp_enabled)
 
-    scaler = torch.amp.GradScaler(enabled=amp_enabled and amp_dtype is torch.float16)
     grad_accum_steps = max(1, int(cfg.grad_accum_steps))
 
     step = 0
