@@ -295,14 +295,16 @@ def run_training(
                 "model_config": {
                     "vocab_size": int(base_model.vocab_size),
                     "hidden_size": int(base_model.hidden_size),
-                    "num_semantic_tokens": int(base_model.quantizer.num_embeddings),
+                    "num_semantic_tokens": int(base_model.quantizer.codebook_size),
                     "semantic_sequence_length": int(base_model.semantic_sequence_length),
                     "pad_token_id": int(base_model.pad_token_id),
                     "semantic_pad_token_id": int(base_model.semantic_pad_token_id),
                     "use_turboquant_kv": bool(base_model.use_turboquant_kv),
                     "turboquant_key_bits": int(base_model.turboquant_key_bits),
                     "turboquant_value_bits": int(base_model.turboquant_value_bits),
-                    "turboquant_qjl_residual_scale": float(base_model.turboquant_qjl_residual_scale),
+                    "turboquant_qjl_residual_scale": float(
+                        base_model.turboquant_qjl_residual_scale
+                    ),
                     "gradient_checkpointing": bool(base_model.gradient_checkpointing),
                     "use_rotary_embeddings": bool(base_model.use_rotary_embeddings),
                 },

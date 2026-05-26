@@ -72,9 +72,7 @@ def _configure_logging(verbose: bool) -> None:
 
     level = logging.DEBUG if verbose else logging.WARNING
     message_format = (
-        "[%(levelname)s] - %(message)s - [%(filename)s:%(lineno)d]"
-        if verbose
-        else "%(message)s"
+        "[%(levelname)s] - %(message)s - [%(filename)s:%(lineno)d]" if verbose else "%(message)s"
     )
     logging.basicConfig(level=level, format=message_format)
 
@@ -136,18 +134,33 @@ def _load_model(checkpoint_path: Path, device: torch.device) -> SemanticTextVQVA
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict):
         raise VQVAEInferenceError("Checkpoint payload must be a dictionary.")
+
     state_dict = payload.get("model", payload)
     model_config = payload.get("model_config", {})
+
     if not isinstance(state_dict, dict):
         raise VQVAEInferenceError("Checkpoint model state must be a dictionary.")
     if not isinstance(model_config, dict):
         raise VQVAEInferenceError("Checkpoint model_config must be a dictionary.")
 
+    # --- ИСПРАВЛЕНИЕ: Очищаем ключи от префикса torch.compile ---
+    clean_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith("_orig_mod."):
+            clean_key = key[len("_orig_mod.") :]
+        else:
+            clean_key = key
+        clean_state_dict[clean_key] = value
+    # -----------------------------------------------------------
+
     model = SemanticTextVQVAE(**model_config)
-    model.load_state_dict(state_dict)
+
+    # Используем очищенный словарь весов
+    model.load_state_dict(clean_state_dict)
     return model.to(device).eval()
 
 

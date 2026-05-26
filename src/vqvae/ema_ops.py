@@ -57,39 +57,44 @@ if triton is not None and tl is not None:
         tl.atomic_add(out_ptr + idx, 1.0, mask=add_mask)
 
     @triton.jit
-    def _sum_by_index_kernel(  # pragma: no cover
+    def _sum_by_index_kernel(
         index_ptr,
         value_ptr,
         out_ptr,
         n_items,
-        n_bins,
         n_cols,
+        n_bins,
         stride_v0,
         stride_v1,
         stride_o0,
         stride_o1,
         BLOCK_N: tl.constexpr,
         BLOCK_D: tl.constexpr,
-    ) -> None:
+    ):
         pid_n = tl.program_id(0)
-        pid_d = tl.program_id(1)
-        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
-        n_mask = offs_n < n_items
+
+        # Загружаем только необходимые нам данные для итерации
+        offs_d = tl.arange(0, BLOCK_D)
         d_mask = offs_d < n_cols
 
-        idx = tl.load(index_ptr + offs_n, mask=n_mask, other=0).to(tl.int32)
-        valid_idx = idx < n_bins
-        values = tl.load(
-            value_ptr + offs_n[:, None] * stride_v0 + offs_d[None, :] * stride_v1,
-            mask=n_mask[:, None] & d_mask[None, :],
-            other=0.0,
-        )
+        # Вместо загрузки всего блока idx и индексации idx[i],
+        # вычисляем смещения внутри цикла
         for i in range(BLOCK_N):
-            idx_i = idx[i]
-            if idx_i >= 0:
-                row_ptr = out_ptr + idx_i * stride_o0 + offs_d * stride_o1
-                tl.atomic_add(row_ptr, values[i, :], mask=valid_idx[i] & d_mask)
+            idx_offset = pid_n * BLOCK_N + i
+            if idx_offset < n_items:
+                # Загружаем индекс по одному элементу
+                idx_i = tl.load(index_ptr + idx_offset).to(tl.int32)
+
+                if idx_i < n_bins:
+                    # Загружаем вектор значений для этого конкретного элемента
+                    val = tl.load(
+                        value_ptr + idx_offset * stride_v0 + offs_d * stride_v1,
+                        mask=d_mask,
+                        other=0.0,
+                    )
+                    # Добавляем в выходной буфер
+                    out_row_ptr = out_ptr + idx_i * stride_o0 + offs_d * stride_o1
+                    tl.atomic_add(out_row_ptr, val, mask=d_mask)
 
 
 def _compute_row_l2_triton(x: torch.Tensor) -> torch.Tensor:
@@ -228,7 +233,9 @@ def ema_update_triton(
     keeping numerically stable scatter/reduction logic in torch.
     """
     num_embeddings = int(ema_cluster_size.shape[0])
-    cluster_size = _bincount_triton(encoding_indices, n_bins=num_embeddings).to(dtype=flat_inputs.dtype)
+    cluster_size = _bincount_triton(encoding_indices, n_bins=num_embeddings).to(
+        dtype=flat_inputs.dtype
+    )
     updated_cluster_size = ema_cluster_size * decay + cluster_size * (1.0 - decay)
     dw = _sum_by_index_triton(encoding_indices, flat_inputs, n_bins=num_embeddings)
     updated_ema_w = ema_w * decay + dw * (1.0 - decay)
