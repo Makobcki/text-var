@@ -62,7 +62,7 @@ def test_config_uses_token_metadata_vocab_when_model_vocab_missing(tmp_path: Pat
         "checkpoint_path": "checkpoints/latest.pt",
         "token_metadata": {
             "kind": "vq",
-            "level_vocab_sizes": [4096, 4096, 50257],
+            "level_vocab_sizes": [4096, 4096, 32000],
             "level_lengths": [64, 128, 512],
             "codebook_dim": 256,
             "max_token_length": 704,
@@ -72,7 +72,7 @@ def test_config_uses_token_metadata_vocab_when_model_vocab_missing(tmp_path: Pat
 
     cfg = load_train_config(cfg_path)
 
-    assert tuple(cfg.model.level_vocab_sizes) == (4096, 4096, 50257)
+    assert tuple(cfg.model.level_vocab_sizes) == (4096, 4096, 32000)
     assert tuple(cfg.model.level_lengths) == (64, 128, 512)
 
 
@@ -86,7 +86,7 @@ def test_config_respects_explicit_model_vocab_over_token_metadata(tmp_path: Path
         },
         "token_metadata": {
             "kind": "vq",
-            "level_vocab_sizes": [4096, 4096, 50257],
+            "level_vocab_sizes": [4096, 4096, 32000],
             "level_lengths": [64, 128, 512],
             "codebook_dim": 256,
             "max_token_length": 704,

@@ -90,7 +90,7 @@ class TextVARPipeline:
             turboquant_kv=turboquant_kv,
         )
 
-        # Берем последний уровень (Уровень 2), который содержит токены из словаря 50257
+        # Берем последний уровень (Уровень 2), который содержит токены из словаря 32000
         bpe_output_tokens = generated_levels[-1]
         return self._tokenizer.batch_decode(bpe_output_tokens.tolist(), skip_special_tokens=True)
 
