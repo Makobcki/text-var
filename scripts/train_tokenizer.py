@@ -68,7 +68,9 @@ def main():
                 from pyarrow import json as pa_json
                 import pyarrow.compute as pc
                 print(f"Оптимизация: используем PyArrow (SoA) для загрузки {filepath}...")
-                table = pa_json.read_json(filepath)
+                # Увеличиваем block_size до 256MB, чтобы избежать ошибки "straddles two block boundaries" на длинных строках
+                read_options = pa_json.ReadOptions(block_size=256 * 1024 * 1024)
+                table = pa_json.read_json(filepath, read_options=read_options)
                 col = "content" if "content" in table.column_names else "text"
                 return pc.drop_null(table[col]).to_pylist()
             except ImportError:
