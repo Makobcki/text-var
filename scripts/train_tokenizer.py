@@ -6,12 +6,12 @@ import sys
 
 from src.tokenizer.trainer import BPETokenizerTrainer
 
-def _signal_handler(sig, frame):
-    print(f"\n[!] Скрипт прерван сигналом {sig}. Принудительный выход...")
-    os._exit(1)
 
-signal.signal(signal.SIGINT, _signal_handler)
-signal.signal(signal.SIGTERM, _signal_handler)
+# Восстанавливаем дефолтные C-обработчики сигналов.
+# Это необходимо, потому что ядро библиотеки tokenizers (Rust) может надолго
+# забирать GIL. Дефолтный обработчик завершит процесс мгновенно на уровне ОС.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
 def parse_args():
@@ -57,21 +57,47 @@ def main():
             return
 
         print(f"Найдено файлов для обучения: {len(files)}")
-        print(f"Начинается обучение токенизатора из текстовых файлов (vocab_size={args.vocab_size})...")
+        print(
+            f"Начинается обучение токенизатора из текстовых файлов (vocab_size={args.vocab_size})..."
+        )
         tokenizer = trainer.train_from_files(files)
-        
+
     elif os.path.isfile(args.data) and args.data.endswith(".jsonl"):
         print(f"Найдено .jsonl датасет: {args.data}")
         print(f"Начинается обучение токенизатора из JSONL (vocab_size={args.vocab_size})...")
-        
+
         def get_jsonl_iterator(filepath, max_samples=None):
-            # Используем стриминг батчами для экономии памяти (AoS или Pandas)
+            # 1. Попытка использовать cuDF для батчевого стриминга (SoA + CUDA)
+            try:
+                import cudf
+                print(f"Оптимизация: используем cuDF (CUDA) для батчевой загрузки {filepath}...")
+                def _cudf_iter():
+                    count = 0
+                    for chunk_df in cudf.read_json(filepath, lines=True, chunksize=10000):
+                        col = "content" if "content" in chunk_df.columns else "text"
+                        # to_arrow().to_pylist() быстро перегоняет SoA колонку в список
+                        batch = chunk_df[col].dropna().to_arrow().to_pylist()
+                        for text in batch:
+                            if text:
+                                yield str(text)
+                                count += 1
+                                if max_samples and count >= max_samples:
+                                    return
+                return _cudf_iter()
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"cuDF fallback (ошибка: {e}). Переход к Pandas...")
+
+            # 2. Используем стриминг батчами через Pandas (CPU)
             try:
                 import pandas as pd
+
                 print(f"Используем pandas для батчевого стриминга {filepath}...")
+
                 def _pandas_iter():
                     count = 0
-                    for chunk_df in pd.read_json(filepath, lines=True, chunksize=10000):
+                    for chunk_df in pd.read_json(filepath, lines=True, chunksize=200000):
                         col = "content" if "content" in chunk_df.columns else "text"
                         for text in chunk_df[col].dropna().astype(str):
                             if text:
@@ -79,10 +105,12 @@ def main():
                                 count += 1
                                 if max_samples and count >= max_samples:
                                     return
+
                 return _pandas_iter()
             except ImportError:
                 print(f"Используем стриминг через стандартный json для загрузки {filepath}...")
                 import json
+
                 def _streaming_iter():
                     count = 0
                     with open(filepath, "r", encoding="utf-8") as f:
@@ -96,11 +124,11 @@ def main():
                                 count += 1
                                 if max_samples and count >= max_samples:
                                     return
+
                 return _streaming_iter()
 
         tokenizer = trainer.train_from_iterator(
-            get_jsonl_iterator(args.data, args.max_samples),
-            length=args.max_samples
+            get_jsonl_iterator(args.data, args.max_samples), length=args.max_samples
         )
     else:
         print(f"Ошибка: Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")
