@@ -112,6 +112,8 @@ class VectorQuantizer(nn.Module):
 
 
 class SemanticTextVQVAE(nn.Module):
+    """Semantic VQ-VAE model for token reconstruction and semantic quantization."""
+
     def __init__(
         self,
         vocab_size: int = 32000,
@@ -127,7 +129,26 @@ class SemanticTextVQVAE(nn.Module):
         turboquant_qjl_residual_scale: float = 0.5,
         gradient_checkpointing: bool = False,
         use_rotary_embeddings: bool = True,
+        use_triton_ema: bool = False,
     ):
+        """Initialize semantic VQ-VAE components.
+
+        Args:
+            vocab_size: Size of text vocabulary.
+            hidden_size: Hidden dimension for encoder/decoder blocks.
+            num_semantic_tokens: Size of VQ codebook.
+            semantic_sequence_length: Number of semantic tokens produced per sample.
+            pad_token_id: Padding token id for text input.
+            semantic_pad_token_id: Padding token id in semantic-token space.
+            max_position_embeddings: Maximum supported sequence length.
+            use_turboquant_kv: Enables turboquant KV cache for decoding.
+            turboquant_key_bits: Bitwidth for turboquant key cache.
+            turboquant_value_bits: Bitwidth for turboquant value cache.
+            turboquant_qjl_residual_scale: Residual scale for turboquant cache.
+            gradient_checkpointing: Enables gradient checkpointing in decoder layers.
+            use_rotary_embeddings: Enables rotary embeddings in decoder attention.
+            use_triton_ema: Enables Triton-accelerated EMA codebook updates.
+        """
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -141,6 +162,7 @@ class SemanticTextVQVAE(nn.Module):
         self.turboquant_qjl_residual_scale = float(turboquant_qjl_residual_scale)
         self.gradient_checkpointing = bool(gradient_checkpointing)
         self.use_rotary_embeddings = bool(use_rotary_embeddings)
+        self.use_triton_ema = bool(use_triton_ema)
 
         self.embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=self.pad_token_id)
         self.pos_embedding = nn.Embedding(self.max_position_embeddings, hidden_size)
@@ -155,7 +177,9 @@ class SemanticTextVQVAE(nn.Module):
 
         # Квантизатор (Codebook)
         self.quantizer = VectorQuantizer(
-            num_embeddings=num_semantic_tokens, embedding_dim=hidden_size
+            num_embeddings=num_semantic_tokens,
+            embedding_dim=hidden_size,
+            use_triton_ema=self.use_triton_ema,
         )
 
         # Компоненты декодера для деквантования и автоэнкодинга
