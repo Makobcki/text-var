@@ -163,6 +163,8 @@ def run_training(
     amp_enabled = dev.type == "cuda"
 
     if use_torch_compile and hasattr(torch, "compile"):
+        from src.core.optimization import setup_blackwell_autotune
+        setup_blackwell_autotune(compile_mode=compile_mode)
         model = torch.compile(base_model, mode=compile_mode)
     else:
         model = base_model

@@ -239,6 +239,8 @@ def run_training(cfg: TrainConfig) -> Path:
     model = VARTransformer(cfg.model).to(device)
     if bool(cfg.compile_enabled):
         if hasattr(torch, "compile"):
+            from src.core.optimization import setup_blackwell_autotune
+            setup_blackwell_autotune(compile_mode=cfg.compile_mode)
             model = torch.compile(model, mode=cfg.compile_mode)
             print(f"[TRAIN] torch.compile enabled (mode={cfg.compile_mode}).")
         else:
