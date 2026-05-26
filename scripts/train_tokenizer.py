@@ -4,7 +4,18 @@ import os
 import signal
 import sys
 
+from rich.console import Console
+from rich.theme import Theme
 from src.tokenizer.trainer import BPETokenizerTrainer
+
+# Настройка красивого вывода
+custom_theme = Theme({
+    "info": "cyan",
+    "warning": "yellow",
+    "error": "bold red",
+    "success": "bold green",
+})
+console = Console(theme=custom_theme)
 
 
 # Восстанавливаем дефолтные C-обработчики сигналов.
@@ -53,24 +64,24 @@ def main():
         # Сбор всех текстовых файлов
         files = glob.glob(os.path.join(args.data, "**/*.txt"), recursive=True)
         if not files:
-            print(f"Ошибка: В директории {args.data} не найдено .txt файлов.")
+            console.print(f"[error]Ошибка:[/error] В директории {args.data} не найдено .txt файлов.")
             return
 
-        print(f"Найдено файлов для обучения: {len(files)}")
-        print(
-            f"Начинается обучение токенизатора из текстовых файлов (vocab_size={args.vocab_size})..."
+        console.print(f"[info]Найдено файлов для обучения:[/info] {len(files)}")
+        console.print(
+            f"[info]Начинается обучение токенизатора из текстовых файлов[/info] (vocab_size={args.vocab_size})..."
         )
         tokenizer = trainer.train_from_files(files)
 
     elif os.path.isfile(args.data) and args.data.endswith(".jsonl"):
-        print(f"Найдено .jsonl датасет: {args.data}")
-        print(f"Начинается обучение токенизатора из JSONL (vocab_size={args.vocab_size})...")
+        console.print(f"[info]Найдено .jsonl датасет:[/info] {args.data}")
+        console.print(f"[info]Начинается обучение токенизатора из JSONL[/info] (vocab_size={args.vocab_size})...")
 
         def get_jsonl_iterator(filepath, max_samples=None):
             # 1. Попытка использовать cuDF для батчевого стриминга (SoA + CUDA)
             try:
                 import cudf
-                print(f"Оптимизация: используем cuDF (CUDA) для батчевой загрузки {filepath}...")
+                console.print(f"[success]Оптимизация:[/success] используем [bold]cuDF (CUDA)[/bold] для батчевой загрузки {filepath}...")
                 def _cudf_iter():
                     import io
                     count = 0
@@ -84,7 +95,8 @@ def main():
                             
                             try:
                                 # Отдаем текст в cuDF через StringIO (обход бага libcudf с byte_range)
-                                chunk_df = cudf.read_json(io.StringIO("".join(lines)), lines=True)
+                                # Указываем compression="uncompressed", чтобы избежать ворнинга от libcudf
+                                chunk_df = cudf.read_json(io.StringIO("".join(lines)), lines=True, compression="uncompressed")
                                 if chunk_df.empty:
                                     continue
                                 
@@ -97,18 +109,18 @@ def main():
                                         if max_samples and count >= max_samples:
                                             return
                             except Exception as e:
-                                print(f"Предупреждение: ошибка чтения чанка cuDF: {e}")
+                                console.print(f"[warning]Предупреждение: ошибка чтения чанка cuDF:[/warning] {e}")
                                 break
                 return _cudf_iter()
             except ImportError:
                 pass
             except Exception as e:
-                print(f"cuDF fallback (ошибка: {e}). Переход к Pandas...")
+                console.print(f"[warning]cuDF fallback (ошибка: {e}). Переход к Pandas...[/warning]")
 
             # 2. Используем стриминг батчами через Pandas (CPU)
             try:
                 import pandas as pd
-                print(f"Используем pandas для батчевого стриминга {filepath}...")
+                console.print(f"[success]Используем pandas[/success] для батчевого стриминга {filepath}...")
                 def _pandas_iter():
                     count = 0
                     # Увеличен батч для современных CPU
@@ -122,7 +134,7 @@ def main():
                                     return
                 return _pandas_iter()
             except ImportError:
-                print(f"Используем стриминг через стандартный json для загрузки {filepath}...")
+                console.print(f"[info]Используем стриминг через стандартный json для загрузки {filepath}...[/info]")
                 import json
                 def _streaming_iter():
                     count = 0
@@ -143,14 +155,14 @@ def main():
             get_jsonl_iterator(args.data, args.max_samples), length=args.max_samples
         )
     else:
-        print(f"Ошибка: Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")
+        console.print(f"[error]Ошибка:[/error] Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")
         return
 
     # Сохранение (создаст tokenizer.json, tokenizer_config.json, special_tokens_map.json)
     os.makedirs(args.save_dir, exist_ok=True)
     tokenizer.save_pretrained(args.save_dir)
-    print(f"Токенизатор успешно сохранен в директорию: {args.save_dir}")
-    print("Теперь его можно загрузить в коде: PreTrainedTokenizerFast.from_pretrained('путь')")
+    console.print(f"[success]Токенизатор успешно сохранен в директорию:[/success] {args.save_dir}")
+    console.print("[info]Теперь его можно загрузить в коде:[/info] [bold]PreTrainedTokenizerFast.from_pretrained('путь')[/bold]")
 
 
 if __name__ == "__main__":

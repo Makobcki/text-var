@@ -19,6 +19,7 @@ dependencies = [
   "uvicorn>=0.30",
   "tokenizers>=0.19",
   "safetensors>=0.4",
+  "rich>=13.0",
 ]
 
 [project.optional-dependencies]
