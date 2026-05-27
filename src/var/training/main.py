@@ -13,11 +13,8 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+from src.core.optimization import build_cosine_warmup_scheduler_lambda
 from src.core.training_logger import StepTiming, TrainingStepLogger
-from src.var.checkpoint import load_checkpoint, restore_training_state, save_checkpoint
-from src.var.training.config import TrainConfig, load_train_config
-from src.var.loss import multiscale_next_scale_cross_entropy
-from src.var.model import VARTransformer
 from src.data.token_cache import (
     MultiscaleTokenChunkIterableDataset,
     MultiscaleTokenDataset,
@@ -27,6 +24,10 @@ from src.data.token_cache import (
     load_token_entries_from_directory,
     validate_tokenizer_metadata,
 )
+from src.var.checkpoint import load_checkpoint, restore_training_state, save_checkpoint
+from src.var.loss import multiscale_next_scale_cross_entropy
+from src.var.model import VARTransformer
+from src.var.training.config import TrainConfig, load_train_config
 
 
 def _compute_grad_norm(model: torch.nn.Module) -> float:
@@ -104,7 +105,11 @@ def _apply_unconditional_prefix_dropout(
             dropped_tokens.append(level_tokens)
             continue
         mask_2d = drop_mask.view(-1, 1).expand_as(level_tokens)
-        dropped_tokens.append(torch.where(mask_2d, torch.zeros((), dtype=level_tokens.dtype, device=device), level_tokens))
+        dropped_tokens.append(
+            torch.where(
+                mask_2d, torch.zeros((), dtype=level_tokens.dtype, device=device), level_tokens
+            )
+        )
     return dropped_tokens
 
 
@@ -240,6 +245,7 @@ def run_training(cfg: TrainConfig) -> Path:
     if bool(cfg.compile_enabled):
         if hasattr(torch, "compile"):
             from src.core.optimization import setup_blackwell_autotune
+
             setup_blackwell_autotune(compile_mode=cfg.compile_mode)
             model = torch.compile(model, mode=cfg.compile_mode)
             print(f"[TRAIN] torch.compile enabled (mode={cfg.compile_mode}).")
@@ -251,7 +257,7 @@ def run_training(cfg: TrainConfig) -> Path:
             import bitsandbytes as bnb
         except ImportError as exc:
             raise ImportError(
-                "optimizer=adamw8bit requires bitsandbytes. Install with `pip install bitsandbytes`."
+                "optimizer=adamw8bit requires bitsandbytes. Install with `pip install bitsandbytes`."  # noqa: E501
             ) from exc
 
         optimizer = bnb.optim.PagedAdamW8bit(
@@ -267,18 +273,16 @@ def run_training(cfg: TrainConfig) -> Path:
         raise ValueError(f"Unsupported optimizer: {cfg.optimizer}")
 
     warmup_steps = int(cfg.max_steps * float(cfg.warmup_ratio))
-    warmup_steps = max(1, min(int(cfg.max_steps) - 1, warmup_steps)) if int(cfg.max_steps) > 1 else 0
+    warmup_steps = (
+        max(1, min(int(cfg.max_steps) - 1, warmup_steps)) if int(cfg.max_steps) > 1 else 0
+    )
     min_lr_ratio = min(1.0, max(0.0, float(cfg.min_learning_rate_ratio)))
 
-    def _lr_lambda(current_step: int) -> float:
-        if int(cfg.max_steps) <= 1:
-            return 1.0
-        if warmup_steps > 0 and current_step < warmup_steps:
-            return float(current_step + 1) / float(warmup_steps)
-        progress_denominator = max(1, int(cfg.max_steps) - warmup_steps)
-        progress = min(1.0, max(0.0, float(current_step - warmup_steps) / float(progress_denominator)))
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+    _lr_lambda = build_cosine_warmup_scheduler_lambda(
+        max_steps=int(cfg.max_steps),
+        warmup_steps=warmup_steps,
+        min_lr_ratio=min_lr_ratio,
+    )
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
     print(
@@ -336,6 +340,7 @@ def run_training(cfg: TrainConfig) -> Path:
 
     amp_dtype = torch.bfloat16
     amp_enabled = bool(cfg.amp_enabled)
+    scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
 
     grad_accum_steps = max(1, int(cfg.grad_accum_steps))
 
@@ -356,7 +361,7 @@ def run_training(cfg: TrainConfig) -> Path:
         loaded_model, payload = load_checkpoint(cfg.checkpoint_path, device=device)
         model.load_state_dict(loaded_model.state_dict())
         restore_training_state(payload, optimizer=optimizer, scaler=scaler, scheduler=scheduler)
-        step = int(payload.get('step', 0))
+        step = int(payload.get("step", 0))
         phase_boundaries = [0]
         for phase_steps in cfg.phase_steps:
             phase_boundaries.append(phase_boundaries[-1] + int(phase_steps))
@@ -430,7 +435,9 @@ def run_training(cfg: TrainConfig) -> Path:
                 if should_step:
                     if float(cfg.grad_clip_norm) > 0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), float(cfg.grad_clip_norm)
+                        )
                     scaler.step(optimizer)
                     scaler.update()
                     scheduler.step()
@@ -438,32 +445,39 @@ def run_training(cfg: TrainConfig) -> Path:
                 scaled_loss.backward()
                 if should_step:
                     if float(cfg.grad_clip_norm) > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), float(cfg.grad_clip_norm)
+                        )
                     optimizer.step()
                     scheduler.step()
 
             backward_time = time.perf_counter() - backward_start
             optimizer_time = 0.0
             if should_step:
-                optimizer_time = max(0.0, time.perf_counter() - step_start - transfer_time - forward_time - backward_time)
+                optimizer_time = max(
+                    0.0,
+                    time.perf_counter() - step_start - transfer_time - forward_time - backward_time,
+                )
 
             if should_step:
                 step += 1
                 accumulated_steps_per_phase += 1
                 last_loss = float(loss.detach().cpu())
-                print(step_logger.build_line(
-                    step=step,
-                    loss=last_loss,
-                    timing=StepTiming(
-                        total=time.perf_counter() - step_start,
-                        stages={
-                            "transfer": transfer_time,
-                            "forward": forward_time,
-                            "backward": backward_time,
-                            "optimizer": optimizer_time,
-                        },
-                    ),
-                ))
+                print(
+                    step_logger.build_line(
+                        step=step,
+                        loss=last_loss,
+                        timing=StepTiming(
+                            total=time.perf_counter() - step_start,
+                            stages={
+                                "transfer": transfer_time,
+                                "forward": forward_time,
+                                "backward": backward_time,
+                                "optimizer": optimizer_time,
+                            },
+                        ),
+                    )
+                )
                 if writer:
                     writer.add_scalar("train/loss", last_loss, step)
                     writer.add_scalar("train/lr", float(scheduler.get_last_lr()[0]), step)
@@ -485,7 +499,10 @@ def run_training(cfg: TrainConfig) -> Path:
                     if wandb_run is not None:
                         wandb_run.log({"train/grad_norm_l2": grad_norm}, step=step)
 
-                if int(cfg.log_weight_norm_every) > 0 and step % int(cfg.log_weight_norm_every) == 0:
+                if (
+                    int(cfg.log_weight_norm_every) > 0
+                    and step % int(cfg.log_weight_norm_every) == 0
+                ):
                     weight_norm = _compute_weight_norm(model)
                     print(f"[MONITOR] step={step} weight_norm={weight_norm:.6f}")
                     if writer:
@@ -493,7 +510,11 @@ def run_training(cfg: TrainConfig) -> Path:
                     if wandb_run is not None:
                         wandb_run.log({"train/weight_norm_l2": weight_norm}, step=step)
 
-                val_every = int(getattr(cfg, "val_every", 0)) or int(cfg.validation_every) or int(cfg.save_every)
+                val_every = (
+                    int(getattr(cfg, "val_every", 0))
+                    or int(cfg.validation_every)
+                    or int(cfg.save_every)
+                )
                 if val_dataloader is not None and val_every > 0 and step % val_every == 0:
                     val_loss = evaluate(
                         model,
@@ -545,7 +566,7 @@ def run_training(cfg: TrainConfig) -> Path:
                     if int(cfg.stateful_context_max_tokens) > 0:
                         stateful_level0_context = stateful_level0_context[
                             :,
-                            -int(cfg.stateful_context_max_tokens):,
+                            -int(cfg.stateful_context_max_tokens) :,
                         ]
             if step >= int(cfg.max_steps):
                 break
