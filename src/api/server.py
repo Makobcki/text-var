@@ -3,18 +3,20 @@
 
 import asyncio
 import logging
-import uuid
 import time
+import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Literal
+from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
+
 from src.api.cli import build_parser
 from src.api.engine import GenerationParams, TextVAREngine
 from src.core.pipeline import PipelineConfig, TextVARPipeline
-from pydantic import BaseModel, Field
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,7 +77,7 @@ class ContinuousBatchingProcessor:
                     break
                 try:
                     pending.append(await asyncio.wait_for(self._queue.get(), timeout=remaining))
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             if _engine is None:
@@ -93,7 +95,7 @@ class ContinuousBatchingProcessor:
                         task.future.set_exception(exc)
                 continue
 
-            for output, task in zip(outputs, pending):
+            for output, task in zip(outputs, pending, strict=True):
                 if not task.future.done():
                     task.future.set_result(output)
 
@@ -297,12 +299,12 @@ async def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResp
         generated_text = await run_in_threadpool(_engine.generate, params)
     except Exception as e:
         LOGGER.error(f"Generation error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     if request.stream:
         raise HTTPException(
             status_code=501,
-            detail="stream=True is not supported yet: token-level streaming generator is not implemented.",
+            detail="stream=True is not supported yet: token-level streaming generator is not implemented.",  # noqa: E501
         )
 
     return ChatCompletionResponse(
@@ -341,12 +343,12 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
         LOGGER.error(f"Generation error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     if request.stream:
         raise HTTPException(
             status_code=501,
-            detail="stream=True is not supported yet: token-level streaming generator is not implemented.",
+            detail="stream=True is not supported yet: token-level streaming generator is not implemented.",  # noqa: E501
         )
 
     return CompletionResponse(
