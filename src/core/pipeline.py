@@ -80,19 +80,13 @@ class TextVARPipeline:
             Decoded text string.
         """
 
-        generated_levels = hybrid_cascade_decode(
-            self._var_model,
-            batch_size=bpe_tokens.shape[0],
-            device=self._device,
-            prefix_inputs=[semantic_prefix],
-            temperature=sampling_temperatures,
-            top_p=sampling_top_ps,
+        return self.generate_batch(
+            prompts=[prompt],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
             turboquant_kv=turboquant_kv,
-        )
-
-        # Берем последний уровень (Уровень 2), который содержит токены из словаря 32000
-        bpe_output_tokens = generated_levels[-1]
-        return self._tokenizer.batch_decode(bpe_output_tokens.tolist(), skip_special_tokens=True)
+        )[0]
 
     @torch.no_grad()
     def generate_batch(
