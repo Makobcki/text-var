@@ -4,10 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from vector_quantize_pytorch import VectorQuantize
+from vector_quantize_pytorch import FSQ
 
 from src.var.generator import KVCacheRingBuffer, TurboQuantConfig, thermodynamic_sampling_with_stats
 from src.var.model import RingKVCacheView, RotaryEmbedding, SDPADecoderLayer
+from src.vqvae.cnn_blocks import HierarchicalDownsample1D, HierarchicalUpsample1D
+from src.vqvae.loss import contrastive_latent_loss, feature_matching_loss
 from src.vqvae.sdpa_blocks import SDPAEncoder
 
 
@@ -59,33 +61,26 @@ class SemanticTextVQVAE(nn.Module):
 
         self.compression_rate = 4
 
-        self.downsample = nn.Conv1d(
-            in_channels=hidden_size,
-            out_channels=hidden_size,
-            kernel_size=self.compression_rate,
-            stride=self.compression_rate,
-        )
-
-        self.upsample = nn.ConvTranspose1d(
-            in_channels=hidden_size,
-            out_channels=hidden_size,
-            kernel_size=self.compression_rate,
-            stride=self.compression_rate,
-        )
-
-        # =====================================================================
-        # 3. State-of-the-Art Квантователь из vector-quantize-pytorch
-        # =====================================================================
-        self.quantizer = VectorQuantize(
+        self.downsample = HierarchicalDownsample1D(
             dim=hidden_size,
-            codebook_size=num_semantic_tokens,
-            decay=0.8,
-            commitment_weight=1.0,
-            kmeans_init=True,
-            kmeans_iters=10,
-            use_cosine_sim=True,
-            threshold_ema_dead_code=2.0,
+            compression_rate=self.compression_rate,
+            num_blocks=2
         )
+
+        self.upsample = HierarchicalUpsample1D(
+            dim=hidden_size,
+            compression_rate=self.compression_rate,
+            num_blocks=2
+        )
+
+        # =====================================================================
+        # 3. Finite Scalar Quantization (FSQ)
+        # =====================================================================
+        self.levels = [8, 8, 8, 8]  # 8^4 = 4096 levels
+        self.fsq_dim = len(self.levels)
+        self.pre_quant_proj = nn.Linear(hidden_size, self.fsq_dim)
+        self.quantizer = FSQ(levels=self.levels)
+        self.post_quant_proj = nn.Linear(self.fsq_dim, hidden_size)
 
         # Компоненты декодера
         self.decoder_layers = nn.ModuleList(
@@ -230,8 +225,9 @@ class SemanticTextVQVAE(nn.Module):
         encoded = self.encoder(x, key_padding_mask=padding_mask, rotary_freqs=rotary_freqs)
 
         semantic_inputs = self._pool_semantic_tokens(encoded, padding_mask=padding_mask)
-        _, indices, commit_loss = self.quantizer(semantic_inputs)
-        return indices, commit_loss.mean()
+        projected_inputs = self.pre_quant_proj(semantic_inputs)
+        _, indices = self.quantizer(projected_inputs)
+        return indices, torch.tensor(0.0, device=indices.device)
 
     def decode_from_semantic_indices(
         self,
@@ -257,10 +253,14 @@ class SemanticTextVQVAE(nn.Module):
         semantic_padding_mask = semantic_indices.eq(int(self.semantic_pad_token_id))
 
         # Получаем векторы из индексов
-        if hasattr(self.quantizer, "get_codes_from_indices"):
-            semantic_features = self.quantizer.get_codes_from_indices(semantic_indices)
+        if hasattr(self.quantizer, "indices_to_codes"):
+            fsq_features = self.quantizer.indices_to_codes(semantic_indices)
+        elif hasattr(self.quantizer, "get_codes_from_indices"):
+            fsq_features = self.quantizer.get_codes_from_indices(semantic_indices)
         else:
-            semantic_features = self.quantizer._codebook.embed[semantic_indices]
+            raise AttributeError("Quantizer does not support indices_to_codes or get_codes_from_indices")
+        
+        semantic_features = self.post_quant_proj(fsq_features)
 
         memory = self._apply_semantic_padding_mask(semantic_features, semantic_padding_mask)
 
@@ -319,9 +319,10 @@ class SemanticTextVQVAE(nn.Module):
         semantic_inputs = self._pool_semantic_tokens(encoded, padding_mask=padding_mask)
         semantic_padding_mask = self._pool_semantic_padding_mask(padding_mask)
 
-        # Вызов vector_quantize_pytorch возвращает 3 значения
-        quantized, indices, commit_loss = self.quantizer(semantic_inputs)
-        vq_loss = commit_loss.mean()
+        projected_inputs = self.pre_quant_proj(semantic_inputs)
+        quantized_fsq, indices = self.quantizer(projected_inputs)
+        quantized = self.post_quant_proj(quantized_fsq)
+        vq_loss = torch.tensor(0.0, device=quantized.device)
 
         tgt_tokens = bpe_tokens[:, :-1]
         tgt_positions = positions[:, :-1]
@@ -343,8 +344,16 @@ class SemanticTextVQVAE(nn.Module):
 
         active_targets = bpe_tokens[:, 1:][valid_mask]
 
-        recon_loss = F.cross_entropy(active_logits, active_targets, reduction="mean")
-        total_loss = recon_loss + vq_loss
+        # 1. Label Smoothing Reconstruction Loss
+        recon_loss = F.cross_entropy(active_logits, active_targets, reduction="mean", label_smoothing=0.1)
+        
+        # 2. Latent Feature Matching Loss
+        fm_loss = feature_matching_loss(semantic_inputs, quantized, mask=semantic_padding_mask)
+        
+        # 3. Contrastive Latent Loss
+        cl_loss = contrastive_latent_loss(semantic_inputs, mask=semantic_padding_mask)
+
+        total_loss = recon_loss + vq_loss + 0.5 * fm_loss + 0.1 * cl_loss
 
         logits = torch.zeros(
             bpe_tokens.size(0),

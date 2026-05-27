@@ -20,6 +20,7 @@ dependencies = [
   "tokenizers>=0.19",
   "safetensors>=0.4",
   "rich>=13.0",
+  "vector-quantize-pytorch>=1.14",
 ]
 
 [project.optional-dependencies]
