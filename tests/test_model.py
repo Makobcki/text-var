@@ -1,7 +1,6 @@
 import torch
-
-from src.var.training.config import VARConfig
 from src.var.model import SDPADecoderLayer, VARTransformer
+from src.var.training.config import VARConfig
 
 
 class _CaptureDecoderLayer(SDPADecoderLayer):
@@ -26,7 +25,7 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         self.causal_flags.append(self_is_causal)
         if past_key_value is None:
             batch_size, seq_len, _ = tgt.shape
-            empty = torch.empty((batch_size, seq_len, self.num_heads, self.head_dim), dtype=tgt.dtype, device=tgt.device)
+            empty = torch.empty((batch_size, seq_len, self.num_heads, self.head_dim), dtype=tgt.dtype, device=tgt.device)  # noqa: E501
             return tgt, (empty, empty)
         return tgt, past_key_value
 

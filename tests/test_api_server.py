@@ -1,7 +1,6 @@
 """Tests for OpenAI-compatible API server endpoints."""
 
 from fastapi.testclient import TestClient
-
 from src.api import server
 
 

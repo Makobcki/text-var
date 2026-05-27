@@ -1,11 +1,10 @@
-from pathlib import Path
 import random
+from pathlib import Path
 
 import torch
-
 from src.var.checkpoint import restore_training_state, save_checkpoint
-from src.var.training.config import VARConfig
 from src.var.model import VARTransformer
+from src.var.training.config import VARConfig
 
 
 def test_save_checkpoint_persists_scaler_and_rng_state(tmp_path: Path) -> None:

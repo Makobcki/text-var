@@ -10,8 +10,7 @@ from typing import Any
 
 import torch
 from safetensors.torch import load_file
-from torch.utils.data import Dataset, IterableDataset
-from torch.utils.data import get_worker_info
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 
 class TokenCacheDataError(ValueError):
@@ -57,7 +56,7 @@ class TokenCacheMetadata:
             )
         if sum(lengths) > int(self.max_token_length):
             raise ValueError(
-                f"Сумма level_lengths ({sum(lengths)}) превышает max_token_length ({self.max_token_length})."
+                f"Сумма level_lengths ({sum(lengths)}) превышает max_token_length ({self.max_token_length})."  # noqa: E501
             )
 
 
@@ -118,7 +117,7 @@ def build_synthetic_token_entries(
         scale_tokens.append(root)
         source = int(root[0].item()) if root.numel() else idx
 
-        # Генерация токенов для последующих уровней с ограничением сверху по индивидуальным размерам словарей
+        # Генерация токенов для последующих уровней с ограничением сверху по индивидуальным размерам словарей  # noqa: E501
         for scale_idx in range(1, len(metadata.level_lengths)):
             length = int(metadata.level_lengths[scale_idx])
             vocab_size = int(metadata.level_vocab_sizes[scale_idx])
@@ -153,7 +152,9 @@ def load_token_entries_from_directory(
         raise ValueError(f"Token cache metadata file not found: {metadata_path}")
 
     metadata = load_token_cache_metadata(metadata_path)
-    chunk_paths = sorted(root.glob("tokens_chunk_*.pt")) + sorted(root.glob("tokens_chunk_*.safetensors"))
+    chunk_paths = sorted(root.glob("tokens_chunk_*.pt")) + sorted(
+        root.glob("tokens_chunk_*.safetensors")
+    )
     if not chunk_paths:
         raise ValueError(f"No token chunk files found in {root}")
     return chunk_paths, metadata
@@ -187,7 +188,9 @@ def _iter_safetensors_entries(
     for level_idx, expected_length in enumerate(metadata.level_lengths):
         level_tensor = payload.get(f"tokens_level_{level_idx}")
         if level_tensor is None or level_tensor.dim() != 2:
-            raise TokenCacheDataError(f"Chunk {chunk_path} missing tokens_level_{level_idx} tensor.")
+            raise TokenCacheDataError(
+                f"Chunk {chunk_path} missing tokens_level_{level_idx} tensor."
+            )
         if level_tensor.shape[0] != ids.shape[0] or level_tensor.shape[1] != expected_length:
             raise TokenCacheDataError(
                 f"Chunk {chunk_path} has invalid shape for tokens_level_{level_idx}."
@@ -195,7 +198,10 @@ def _iter_safetensors_entries(
         level_tensors.append(level_tensor)
 
     for row_idx in range(ids.shape[0]):
-        out = [torch.as_tensor(level_tensor[row_idx], dtype=torch.long) for level_tensor in level_tensors]
+        out = [
+            torch.as_tensor(level_tensor[row_idx], dtype=torch.long)
+            for level_tensor in level_tensors
+        ]
         if validate_ranges:
             for lvl_idx, vocab_size in enumerate(metadata.level_vocab_sizes):
                 item = out[lvl_idx]
@@ -261,19 +267,23 @@ class MultiscaleTokenChunkIterableDataset(IterableDataset):
         for index, entry in enumerate(entries):
             tokens = entry.get("tokens") if isinstance(entry, dict) else None
             if not isinstance(tokens, list) or len(tokens) != len(self.metadata.level_lengths):
-                raise TokenCacheDataError(f"Token cache entry has invalid scale count in {chunk_path}.")
+                raise TokenCacheDataError(
+                    f"Token cache entry has invalid scale count in {chunk_path}."
+                )
 
             out = [torch.as_tensor(item, dtype=torch.long) for item in tokens]
             for lvl_idx, (expected, vocab_size) in enumerate(
-                zip(self.metadata.level_lengths, self.metadata.level_vocab_sizes)
+                zip(self.metadata.level_lengths, self.metadata.level_vocab_sizes, strict=True)
             ):
                 item = out[lvl_idx]
                 if item.numel() != expected:
                     raise TokenCacheDataError(
                         f"Token level {lvl_idx} expected {expected} tokens, got {item.numel()}."
                     )
-                if self.validate_ranges and item.numel() and (
-                    int(item.max().item()) >= vocab_size or int(item.min().item()) < 0
+                if (
+                    self.validate_ranges
+                    and item.numel()
+                    and (int(item.max().item()) >= vocab_size or int(item.min().item()) < 0)
                 ):
                     raise TokenCacheDataError("Token value outside tokenizer codebook.")
 
@@ -341,7 +351,7 @@ class MultiscaleTokenDataset(Dataset):
 
         out = [torch.as_tensor(item, dtype=torch.long) for item in tokens]
         for lvl_idx, (expected, vocab_size) in enumerate(
-            zip(self.metadata.level_lengths, self.metadata.level_vocab_sizes)
+            zip(self.metadata.level_lengths, self.metadata.level_vocab_sizes, strict=True)
         ):
             item = out[lvl_idx]
             if item.numel() != expected:

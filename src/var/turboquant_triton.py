@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
 from typing import Final
 
 import torch
@@ -50,8 +49,6 @@ _SUPPORTED_PACKED_BITS: Final[set[int]] = {4, 8}
 
 
 if triton is not None:
-
-
     _AUTOTUNE_CONFIGS = [
         triton.Config({"BLOCK_M": 16, "BLOCK_N": 32}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_M": 16, "BLOCK_N": 64}, num_warps=4, num_stages=4),
@@ -131,7 +128,13 @@ if triton is not None:
         off_d = tl.arange(0, BLOCK_D)
         b = pid_bh // nheads
         h = pid_bh % nheads
-        q_ptr = Q + b * stride_qz + h * stride_qh + off_m[:, None] * stride_qm + off_d[None, :] * stride_qd
+        q_ptr = (
+            Q
+            + b * stride_qz
+            + h * stride_qh
+            + off_m[:, None] * stride_qm
+            + off_d[None, :] * stride_qd
+        )
         q = tl.load(q_ptr, mask=off_m[:, None] < seqlen_q, other=0.0)
         acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
         m_i = tl.full((BLOCK_M,), float("-inf"), dtype=tl.float32)
@@ -139,15 +142,39 @@ if triton is not None:
         for start_n in range(0, tl.cdiv(seqlen_k, BLOCK_N)):
             token_idx = start_n * BLOCK_N + off_n
             if PACKED_BITS == 8:
-                k_ptr = K + b * stride_kz + h * stride_kh + token_idx[:, None] * stride_kn + off_d[None, :] * stride_kd
-                v_ptr = V + b * stride_vz + h * stride_vh + token_idx[:, None] * stride_vn + off_d[None, :] * stride_vd
+                k_ptr = (
+                    K
+                    + b * stride_kz
+                    + h * stride_kh
+                    + token_idx[:, None] * stride_kn
+                    + off_d[None, :] * stride_kd
+                )
+                v_ptr = (
+                    V
+                    + b * stride_vz
+                    + h * stride_vh
+                    + token_idx[:, None] * stride_vn
+                    + off_d[None, :] * stride_vd
+                )
                 k_q = tl.load(k_ptr, mask=token_idx[:, None] < seqlen_k, other=0).to(tl.float16)
                 v_q = tl.load(v_ptr, mask=token_idx[:, None] < seqlen_k, other=0).to(tl.float16)
             elif PACKED_BITS == 4:
                 byte_idx = off_d[None, :] // 2
                 nibble_sel = off_d[None, :] % 2
-                k_ptr = K + b * stride_kz + h * stride_kh + token_idx[:, None] * stride_kn + byte_idx * stride_kd
-                v_ptr = V + b * stride_vz + h * stride_vh + token_idx[:, None] * stride_vn + byte_idx * stride_vd
+                k_ptr = (
+                    K
+                    + b * stride_kz
+                    + h * stride_kh
+                    + token_idx[:, None] * stride_kn
+                    + byte_idx * stride_kd
+                )
+                v_ptr = (
+                    V
+                    + b * stride_vz
+                    + h * stride_vh
+                    + token_idx[:, None] * stride_vn
+                    + byte_idx * stride_vd
+                )
                 k_byte = tl.load(k_ptr, mask=token_idx[:, None] < seqlen_k, other=0)
                 v_byte = tl.load(v_ptr, mask=token_idx[:, None] < seqlen_k, other=0)
                 k_lo = (k_byte & 0x0F).to(tl.float16)
@@ -160,16 +187,40 @@ if triton is not None:
                 k_q = tl.zeros((BLOCK_N, BLOCK_D), dtype=tl.float16)
                 v_q = tl.zeros((BLOCK_N, BLOCK_D), dtype=tl.float16)
 
-            ks_ptr = K_SCALES + b * stride_ksz + h * stride_ksh + token_idx[:, None] * stride_ksn + tl.zeros((1, BLOCK_D), dtype=tl.int32) * stride_ksd
-            vs_ptr = V_SCALES + b * stride_vsz + h * stride_vsh + token_idx[:, None] * stride_vsn + tl.zeros((1, BLOCK_D), dtype=tl.int32) * stride_vsd
+            ks_ptr = (
+                K_SCALES
+                + b * stride_ksz
+                + h * stride_ksh
+                + token_idx[:, None] * stride_ksn
+                + tl.zeros((1, BLOCK_D), dtype=tl.int32) * stride_ksd
+            )
+            vs_ptr = (
+                V_SCALES
+                + b * stride_vsz
+                + h * stride_vsh
+                + token_idx[:, None] * stride_vsn
+                + tl.zeros((1, BLOCK_D), dtype=tl.int32) * stride_vsd
+            )
             ks = tl.load(ks_ptr, mask=token_idx[:, None] < seqlen_k, other=0.0)
             vs = tl.load(vs_ptr, mask=token_idx[:, None] < seqlen_k, other=0.0)
 
             k = k_q * ks
             v = v_q * vs
 
-            kqjl_ptr = K_QJL + b * stride_kqz + h * stride_kqh + token_idx[:, None] * stride_kqn + off_d[None, :] * stride_kqd
-            vqjl_ptr = V_QJL + b * stride_vqz + h * stride_vqh + token_idx[:, None] * stride_vqn + off_d[None, :] * stride_vqd
+            kqjl_ptr = (
+                K_QJL
+                + b * stride_kqz
+                + h * stride_kqh
+                + token_idx[:, None] * stride_kqn
+                + off_d[None, :] * stride_kqd
+            )
+            vqjl_ptr = (
+                V_QJL
+                + b * stride_vqz
+                + h * stride_vqh
+                + token_idx[:, None] * stride_vqn
+                + off_d[None, :] * stride_vqd
+            )
             kqjl = tl.load(kqjl_ptr, mask=token_idx[:, None] < seqlen_k, other=0)
             vqjl = tl.load(vqjl_ptr, mask=token_idx[:, None] < seqlen_k, other=0)
             ksign = tl.where(kqjl > 0, 1.0, -1.0)
@@ -193,7 +244,13 @@ if triton is not None:
             m_i = m_ij
         l_i = tl.where(l_i > 0.0, l_i, 1.0)
         acc = acc / l_i[:, None]
-        o_ptr = out_tensor + b * stride_oz + h * stride_oh + off_m[:, None] * stride_om + off_d[None, :] * stride_od
+        o_ptr = (
+            out_tensor
+            + b * stride_oz
+            + h * stride_oh
+            + off_m[:, None] * stride_om
+            + off_d[None, :] * stride_od
+        )
         tl.store(o_ptr, acc.to(tl.float16), mask=off_m[:, None] < seqlen_q)
 
 
@@ -228,7 +285,9 @@ def turboquant_attention(
         )
     k, v = _dequantize_kv(inputs=inputs, fallback_k=fallback_k, fallback_v=fallback_v)
     if triton is None or tl is None or (not q.is_cuda):
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=is_causal)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=is_causal
+        )
     return _launch_turboquant_kernel(q=q, k=k, v=v, causal=is_causal, raw_inputs=inputs)
 
 
@@ -250,9 +309,12 @@ def _dequantize_kv(
     """
     if inputs.k_scales.numel() == 0 or inputs.v_scales.numel() == 0:
         return fallback_k.contiguous(), fallback_v.contiguous()
-    if inputs.key_bits not in _SUPPORTED_PACKED_BITS or inputs.value_bits not in _SUPPORTED_PACKED_BITS:
+    if (
+        inputs.key_bits not in _SUPPORTED_PACKED_BITS
+        or inputs.value_bits not in _SUPPORTED_PACKED_BITS
+    ):
         raise TurboQuantKernelError(
-            f"Unsupported quantization bits for Triton kernel: K={inputs.key_bits}, V={inputs.value_bits}. "
+            f"Unsupported quantization bits for Triton kernel: K={inputs.key_bits}, V={inputs.value_bits}. "  # noqa: E501
             "Supported values are 4 or 8."
         )
     if inputs.key_bits != inputs.value_bits:
@@ -285,7 +347,12 @@ def _should_use_safe_fallback(inputs: TurboQuantTritonInputs) -> bool:
     Returns:
         Whether to force standard SDPA fallback.
     """
-    return inputs.k_scales is None or inputs.v_scales is None or inputs.k_scales.numel() == 0 or inputs.v_scales.numel() == 0
+    return (
+        inputs.k_scales is None
+        or inputs.v_scales is None
+        or inputs.k_scales.numel() == 0
+        or inputs.v_scales.numel() == 0
+    )
 
 
 def _unpack_4bit_tensor(packed: torch.Tensor, output_dim: int) -> torch.Tensor:
@@ -320,9 +387,12 @@ def _validate_inputs_for_kernel(
     Raises:
         TurboQuantKernelError: If shapes/bitness are inconsistent.
     """
-    if inputs.key_bits not in _SUPPORTED_PACKED_BITS or inputs.value_bits not in _SUPPORTED_PACKED_BITS:
+    if (
+        inputs.key_bits not in _SUPPORTED_PACKED_BITS
+        or inputs.value_bits not in _SUPPORTED_PACKED_BITS
+    ):
         raise TurboQuantKernelError(
-            f"Unsupported quantization bits for Triton kernel: K={inputs.key_bits}, V={inputs.value_bits}. "
+            f"Unsupported quantization bits for Triton kernel: K={inputs.key_bits}, V={inputs.value_bits}. "  # noqa: E501
             "Supported values are 4 or 8."
         )
     if inputs.key_bits != inputs.value_bits:
@@ -333,7 +403,10 @@ def _validate_inputs_for_kernel(
         raise TurboQuantKernelError("fallback_k and fallback_v must have identical shapes.")
     if inputs.key_bits == 4 and inputs.k_scales.numel() > 0:
         expected_packed = (fallback_k.shape[-1] + 1) // 2
-        if inputs.k_quant.shape[-1] != expected_packed or inputs.v_quant.shape[-1] != expected_packed:
+        if (
+            inputs.k_quant.shape[-1] != expected_packed
+            or inputs.v_quant.shape[-1] != expected_packed
+        ):
             raise TurboQuantKernelError(
                 "Packed 4-bit tensors must have trailing dim ceil(head_dim / 2)."
             )
@@ -388,21 +461,40 @@ def _launch_turboquant_kernel(
         raise TurboQuantKernelError("Expected q/k/v to be rank-4 tensors.")
     bsz, heads, seqlen_q, head_dim = q.shape
     if raw_inputs.k_scales.numel() == 0 or raw_inputs.v_scales.numel() == 0:
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
-    if raw_inputs.key_bits not in _SUPPORTED_PACKED_BITS or raw_inputs.value_bits not in _SUPPORTED_PACKED_BITS:
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal
+        )
+    if (
+        raw_inputs.key_bits not in _SUPPORTED_PACKED_BITS
+        or raw_inputs.value_bits not in _SUPPORTED_PACKED_BITS
+    ):
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal
+        )
     if raw_inputs.key_bits != raw_inputs.value_bits:
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal
+        )
     if head_dim not in _SUPPORTED_HEAD_DIMS:
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=causal
+        )
     out = torch.empty_like(q)
     decoding_mode = seqlen_q == 1
     block_m = 1 if decoding_mode else 64
     block_n = 64
     num_warps = 4 if decoding_mode else 8
     grid = (triton.cdiv(seqlen_q, block_m), bsz * heads)
-    k_scales = _reshape_scales(raw_inputs.k_scales, raw_inputs.k_quant) if raw_inputs.k_scales.numel() > 0 else torch.ones((*k.shape[:-1], 1), device=k.device, dtype=k.dtype)
-    v_scales = _reshape_scales(raw_inputs.v_scales, raw_inputs.v_quant) if raw_inputs.v_scales.numel() > 0 else torch.ones((*v.shape[:-1], 1), device=v.device, dtype=v.dtype)
+    k_scales = (
+        _reshape_scales(raw_inputs.k_scales, raw_inputs.k_quant)
+        if raw_inputs.k_scales.numel() > 0
+        else torch.ones((*k.shape[:-1], 1), device=k.device, dtype=k.dtype)
+    )
+    v_scales = (
+        _reshape_scales(raw_inputs.v_scales, raw_inputs.v_quant)
+        if raw_inputs.v_scales.numel() > 0
+        else torch.ones((*v.shape[:-1], 1), device=v.device, dtype=v.dtype)
+    )
     k_qjl = _safe_sign_tensor(raw_inputs.k_qjl_signs, k)
     v_qjl = _safe_sign_tensor(raw_inputs.v_qjl_signs, v)
 
@@ -481,7 +573,9 @@ def _safe_sign_tensor(signs: torch.Tensor | None, reference: torch.Tensor) -> to
     return torch.where(signs > 0, 1, -1).to(dtype=torch.int8)
 
 
-def turboquant_attention_causal(inputs: TurboQuantTritonInputs, *, fallback_k: torch.Tensor, fallback_v: torch.Tensor) -> torch.Tensor:
+def turboquant_attention_causal(
+    inputs: TurboQuantTritonInputs, *, fallback_k: torch.Tensor, fallback_v: torch.Tensor
+) -> torch.Tensor:
     """Explicit causal attention entrypoint with fallback logic.
 
     Args:
@@ -495,5 +589,7 @@ def turboquant_attention_causal(inputs: TurboQuantTritonInputs, *, fallback_k: t
     q = inputs.q.contiguous()
     k, v = _dequantize_kv(inputs=inputs, fallback_k=fallback_k, fallback_v=fallback_v)
     if triton is None or tl is None or (not q.is_cuda):
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True
+        )
     return _launch_turboquant_kernel(q=q, k=k, v=v, causal=True, raw_inputs=inputs)

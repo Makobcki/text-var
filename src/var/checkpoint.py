@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from src.var.training.config import VARConfig
 from src.var.model import VARTransformer
+from src.var.training.config import VARConfig
 
 
 def _collect_rng_state() -> dict[str, Any]:
@@ -63,7 +63,9 @@ def save_checkpoint(
     torch.save(payload, ckpt_path)
 
 
-def load_checkpoint(path: str | Path, *, device: torch.device) -> tuple[VARTransformer, dict[str, Any]]:
+def load_checkpoint(
+    path: str | Path, *, device: torch.device
+) -> tuple[VARTransformer, dict[str, Any]]:
     checkpoint_path = Path(path)
     try:
         payload = torch.load(checkpoint_path, map_location=device, weights_only=False)

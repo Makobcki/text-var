@@ -1,6 +1,3 @@
-import os
-from typing import List, Optional, Union
-
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, processors, trainers
 from transformers import PreTrainedTokenizerFast
 
@@ -14,7 +11,7 @@ class BPETokenizerTrainer:
     def __init__(
         self,
         vocab_size: int = 32000,
-        special_tokens: Optional[List[str]] = None,
+        special_tokens: list[str] | None = None,
         min_frequency: int = 2,
     ):
         self.vocab_size = vocab_size
@@ -36,7 +33,7 @@ class BPETokenizerTrainer:
         self.tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
         self.tokenizer.decoder = decoders.ByteLevel()
 
-    def train_from_files(self, files: Union[str, List[str]]) -> PreTrainedTokenizerFast:
+    def train_from_files(self, files: str | list[str]) -> PreTrainedTokenizerFast:
         """
         Обучает токенизатор на списке текстовых файлов.
         """
@@ -67,7 +64,7 @@ class BPETokenizerTrainer:
 
         return fast_tokenizer
 
-    def train_from_iterator(self, iterator, length: Optional[int] = None) -> PreTrainedTokenizerFast:
+    def train_from_iterator(self, iterator, length: int | None = None) -> PreTrainedTokenizerFast:
         """
         Альтернативный метод обучения из Python-генератора (полезно для HuggingFace Datasets).
         """

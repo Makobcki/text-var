@@ -1,5 +1,4 @@
 import torch
-
 from src.vqvae.model import VectorQuantizer
 
 

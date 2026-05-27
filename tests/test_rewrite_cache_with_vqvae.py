@@ -76,9 +76,9 @@ def test_rewrite_multitoken_semantic_target(tmp_path: Path) -> None:
     chunk_path = cache_dir / "tokens_chunk_00000.pt"
     lvl0 = torch.tensor([7, 7], dtype=torch.long)
     lvl2 = torch.tensor([1, 2, 3, 4], dtype=torch.long)
-    torch.save({"metadata": metadata.to_dict(), "entries": [{"id": "sample-1", "tokens": [lvl0, torch.tensor([0, 1]), lvl2]}]}, chunk_path)
+    torch.save({"metadata": metadata.to_dict(), "entries": [{"id": "sample-1", "tokens": [lvl0, torch.tensor([0, 1]), lvl2]}]}, chunk_path)  # noqa: E501
 
-    model = SemanticTextVQVAE(vocab_size=32, hidden_size=32, num_semantic_tokens=16, semantic_sequence_length=2)
+    model = SemanticTextVQVAE(vocab_size=32, hidden_size=32, num_semantic_tokens=16, semantic_sequence_length=2)  # noqa: E501
     checkpoint_path = tmp_path / "vqvae_multi.pt"
     torch.save({"model": model.state_dict()}, checkpoint_path)
 

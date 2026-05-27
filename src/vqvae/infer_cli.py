@@ -6,7 +6,6 @@ import argparse
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
 from rich.console import Console
@@ -150,10 +149,7 @@ def _load_model(checkpoint_path: Path, device: torch.device) -> SemanticTextVQVA
     # --- ИСПРАВЛЕНИЕ: Очищаем ключи от префикса torch.compile ---
     clean_state_dict = {}
     for key, value in state_dict.items():
-        if key.startswith("_orig_mod."):
-            clean_key = key[len("_orig_mod.") :]
-        else:
-            clean_key = key
+        clean_key = key[len("_orig_mod.") :] if key.startswith("_orig_mod.") else key
         clean_state_dict[clean_key] = value
     # -----------------------------------------------------------
 

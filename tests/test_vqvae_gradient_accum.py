@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from src.vqvae.training import main as training_main
 
 

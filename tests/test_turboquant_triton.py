@@ -6,10 +6,10 @@ from src.var.turboquant_triton import (
     TurboQuantKernelError,
     TurboQuantTritonInputs,
     _reshape_scales,
-    turboquant_attention_causal,
-    turboquant_attention,
     _unpack_4bit_tensor,
     _validate_inputs_for_kernel,
+    turboquant_attention,
+    turboquant_attention_causal,
 )
 
 
@@ -32,7 +32,7 @@ def test_reshape_scales_rejects_invalid_rank() -> None:
 def test_triton_inputs_dataclass_stores_tensors() -> None:
     """Input dataclass keeps all tensor references."""
     q = torch.ones((1, 1, 1, 8), dtype=torch.float16)
-    bundle = TurboQuantTritonInputs(q=q, k_quant=q.to(torch.int8), v_quant=q.to(torch.int8), k_scales=torch.ones((1, 1, 1)), v_scales=torch.ones((1, 1, 1)))
+    bundle = TurboQuantTritonInputs(q=q, k_quant=q.to(torch.int8), v_quant=q.to(torch.int8), k_scales=torch.ones((1, 1, 1)), v_scales=torch.ones((1, 1, 1)))  # noqa: E501
     assert bundle.q.shape[-1] == 8
 
 
@@ -41,7 +41,7 @@ def test_turboquant_attention_causal_fallback_shape() -> None:
     q = torch.randn((1, 1, 2, 8), dtype=torch.float16)
     k = torch.randn((1, 1, 2, 8), dtype=torch.float16)
     v = torch.randn((1, 1, 2, 8), dtype=torch.float16)
-    bundle = TurboQuantTritonInputs(q=q, k_quant=k.to(torch.int8), v_quant=v.to(torch.int8), k_scales=torch.empty(0), v_scales=torch.empty(0))
+    bundle = TurboQuantTritonInputs(q=q, k_quant=k.to(torch.int8), v_quant=v.to(torch.int8), k_scales=torch.empty(0), v_scales=torch.empty(0))  # noqa: E501
     out = turboquant_attention_causal(bundle, fallback_k=k, fallback_v=v)
     assert tuple(out.shape) == (1, 1, 2, 8)
 

@@ -1,5 +1,4 @@
 import torch
-
 from src.var.training.main import _apply_unconditional_prefix_dropout
 
 
@@ -20,5 +19,5 @@ def test_unconditional_prefix_dropout_keeps_tokens_when_disabled() -> None:
     levels = [torch.tensor([[1, 2], [3, 4]], dtype=torch.long) for _ in range(3)]
     dropped = _apply_unconditional_prefix_dropout(levels, drop_prob=0.0)
 
-    for original, current in zip(levels, dropped):
+    for original, current in zip(levels, dropped, strict=True):
         assert torch.equal(original, current)

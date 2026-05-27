@@ -1,5 +1,4 @@
 import torch
-
 from src.var.loss import _cross_entropy_per_token
 
 
@@ -84,7 +83,7 @@ def test_multiscale_loss_is_invariant_to_fully_padding_level() -> None:
     fully_padded = torch.zeros((1, 3), dtype=torch.long)
 
     loss_without_padding_level = multiscale_next_scale_cross_entropy(model, [informative])
-    loss_with_padding_level = multiscale_next_scale_cross_entropy(model, [informative, fully_padded])
+    loss_with_padding_level = multiscale_next_scale_cross_entropy(model, [informative, fully_padded])  # noqa: E501
 
     assert torch.isfinite(loss_without_padding_level)
     assert torch.isfinite(loss_with_padding_level)

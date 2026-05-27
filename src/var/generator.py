@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Union
 
 import torch
 import torch.nn.functional as F
@@ -53,14 +52,20 @@ class TurboQuantCodec:
         self._key_zeros[layer_idx] = torch.empty(base_shape, dtype=torch.float32, device=device)
         self._value_scales[layer_idx] = torch.empty(base_shape, dtype=torch.float32, device=device)
         self._value_zeros[layer_idx] = torch.empty(base_shape, dtype=torch.float32, device=device)
-        self._key_residual_signs[layer_idx] = torch.empty(resid_shape, dtype=torch.bool, device=device)
-        self._value_residual_signs[layer_idx] = torch.empty(resid_shape, dtype=torch.bool, device=device)
+        self._key_residual_signs[layer_idx] = torch.empty(
+            resid_shape, dtype=torch.bool, device=device
+        )
+        self._value_residual_signs[layer_idx] = torch.empty(
+            resid_shape, dtype=torch.bool, device=device
+        )
 
     def packed_dim(self, bits: int) -> int:
         """Return packed byte width for one head vector."""
         return (self.head_dim * bits + 7) // 8
 
-    def quantize_step(self, layer_idx: int, key: torch.Tensor, value: torch.Tensor, write_ptr: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def quantize_step(
+        self, layer_idx: int, key: torch.Tensor, value: torch.Tensor, write_ptr: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         qk, ks, kz, kr = self._quantize_tensor(key, bits=self.cfg.key_bits)
         qv, vs, vz, vr = self._quantize_tensor(value, bits=self.cfg.value_bits)
         sl = slice(write_ptr, write_ptr + 1)
@@ -78,13 +83,17 @@ class TurboQuantCodec:
         layer_idx = view.layer_idx
         positions = view.positions
         key = self._dequantize_tensor(
-            self._unpack_bits(view.keys.index_select(1, positions), self.cfg.key_bits).to(torch.float32),
+            self._unpack_bits(view.keys.index_select(1, positions), self.cfg.key_bits).to(
+                torch.float32
+            ),
             self._key_scales[layer_idx].index_select(1, positions),
             self._key_zeros[layer_idx].index_select(1, positions),
             self._key_residual_signs[layer_idx].index_select(1, positions),
         )
         value = self._dequantize_tensor(
-            self._unpack_bits(view.values.index_select(1, positions), self.cfg.value_bits).to(torch.float32),
+            self._unpack_bits(view.values.index_select(1, positions), self.cfg.value_bits).to(
+                torch.float32
+            ),
             self._value_scales[layer_idx].index_select(1, positions),
             self._value_zeros[layer_idx].index_select(1, positions),
             self._value_residual_signs[layer_idx].index_select(1, positions),
@@ -119,7 +128,9 @@ class TurboQuantCodec:
             self._value_residual_signs[layer_idx].index_select(1, positions),
         )
 
-    def _quantize_tensor(self, x: torch.Tensor, bits: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _quantize_tensor(
+        self, x: torch.Tensor, bits: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         xr = torch.einsum("bthd,df->bthf", x.to(torch.float32), self.rotation)
         xmin = xr.amin(dim=-1, keepdim=True)
         xmax = xr.amax(dim=-1, keepdim=True)
@@ -131,7 +142,9 @@ class TurboQuantCodec:
         residual_sign = (xr - recon) >= 0
         return q, scale, zero, residual_sign
 
-    def _dequantize_tensor(self, q: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor, residual_sign: torch.Tensor) -> torch.Tensor:
+    def _dequantize_tensor(
+        self, q: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor, residual_sign: torch.Tensor
+    ) -> torch.Tensor:
         residual = torch.where(residual_sign, 1.0, -1.0) * scale * self.cfg.qjl_residual_scale
         xr = (q * scale) + zero + residual
         return torch.einsum("bthd,df->bthf", xr, self.inv_rotation)
@@ -159,7 +172,9 @@ class TurboQuantCodec:
 
     def _unpack_bits(self, packed: torch.Tensor, bits: int) -> torch.Tensor:
         packed_flat = packed.to(torch.int32).reshape(-1, packed.shape[-1])
-        out = torch.zeros((packed_flat.shape[0], self.head_dim), dtype=torch.uint8, device=packed.device)
+        out = torch.zeros(
+            (packed_flat.shape[0], self.head_dim), dtype=torch.uint8, device=packed.device
+        )
         mask = (1 << bits) - 1
         for i in range(self.head_dim):
             bit_offset = i * bits
@@ -258,7 +273,9 @@ class KVCacheRingBuffer:
                 )
                 continue
             ptr = self._write_ptrs[layer_idx]
-            positions = (torch.arange(self.max_window, device=key_buffer.device, dtype=torch.long) + ptr) % self.max_window
+            positions = (
+                torch.arange(self.max_window, device=key_buffer.device, dtype=torch.long) + ptr
+            ) % self.max_window
             ordered.append(
                 RingKVCacheView(
                     keys=key_buffer,
@@ -278,16 +295,32 @@ class KVCacheRingBuffer:
             b, _, h, d = key.shape
             if self._turboquant_config is not None:
                 if self._codec is None:
-                    self._codec = TurboQuantCodec(self._turboquant_config, head_dim=d, device=key.device)
+                    self._codec = TurboQuantCodec(
+                        self._turboquant_config, head_dim=d, device=key.device
+                    )
                 self._codec.init_layer_state()
                 key_pack_dim = self._codec.packed_dim(self._turboquant_config.key_bits)
                 value_pack_dim = self._codec.packed_dim(self._turboquant_config.value_bits)
-                self._keys.append(torch.empty((b, self.max_window, h, key_pack_dim), dtype=torch.uint8, device=key.device))
-                self._values.append(torch.empty((b, self.max_window, h, value_pack_dim), dtype=torch.uint8, device=value.device))
+                self._keys.append(
+                    torch.empty(
+                        (b, self.max_window, h, key_pack_dim), dtype=torch.uint8, device=key.device
+                    )
+                )
+                self._values.append(
+                    torch.empty(
+                        (b, self.max_window, h, value_pack_dim),
+                        dtype=torch.uint8,
+                        device=value.device,
+                    )
+                )
                 self._codec.allocate_layer(len(self._keys) - 1, b, self.max_window, h, key.device)
             else:
-                self._keys.append(torch.empty((b, self.max_window, h, d), dtype=key.dtype, device=key.device))
-                self._values.append(torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device))
+                self._keys.append(
+                    torch.empty((b, self.max_window, h, d), dtype=key.dtype, device=key.device)
+                )
+                self._values.append(
+                    torch.empty((b, self.max_window, h, d), dtype=value.dtype, device=value.device)
+                )
             self._lengths.append(0)
             self._write_ptrs.append(0)
 
@@ -308,7 +341,7 @@ class KVCacheRingBuffer:
 
 
 def _to_batch_vector(
-    value: Union[float, torch.Tensor],
+    value: float | torch.Tensor,
     *,
     batch_size: int,
     device: torch.device,
@@ -344,8 +377,8 @@ def _to_batch_vector(
 def thermodynamic_sampling_with_stats(
     logits: torch.Tensor,
     alpha: float = 1.0,
-    temperature: Union[float, torch.Tensor] = 1.0,
-    top_p: Union[float, torch.Tensor] = 1.0,
+    temperature: float | torch.Tensor = 1.0,
+    top_p: float | torch.Tensor = 1.0,
     t_min: float = 0.1,
     t_max: float = 2.0,
     healthy_entropy_limit: float = 1.5,
@@ -380,7 +413,9 @@ def thermodynamic_sampling_with_stats(
 
     batch_size = logits.shape[0]
     temperatures = torch.clamp(
-        _to_batch_vector(temperature, batch_size=batch_size, device=logits.device, dtype=logits.dtype),
+        _to_batch_vector(
+            temperature, batch_size=batch_size, device=logits.device, dtype=logits.dtype
+        ),
         min=1e-5,
     ).unsqueeze(-1)
     top_ps = torch.clamp(
@@ -398,7 +433,9 @@ def thermodynamic_sampling_with_stats(
         remove_mask[..., 1:] = remove_mask[..., :-1].clone()
         remove_mask[..., 0] = False
         sorted_logits = sorted_logits.masked_fill(remove_mask, float("-inf"))
-        scaled_logits = torch.full_like(scaled_logits, float("-inf")).scatter(-1, sorted_indices, sorted_logits)
+        scaled_logits = torch.full_like(scaled_logits, float("-inf")).scatter(
+            -1, sorted_indices, sorted_logits
+        )
     next_tokens = torch.distributions.Categorical(logits=scaled_logits).sample()
 
     return next_tokens, entropy, chaos_diff
@@ -413,8 +450,8 @@ def _decode_next_ar_token(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: Union[float, torch.Tensor],
-    top_p: Union[float, torch.Tensor],
+    temperature: float | torch.Tensor,
+    top_p: float | torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch = sequence.shape[0]
     bos = torch.full((batch, 1), model.cfg.mask_token_id, dtype=torch.long, device=sequence.device)
@@ -445,8 +482,8 @@ def _decode_next_ar_token_with_cache(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: Union[float, torch.Tensor],
-    top_p: Union[float, torch.Tensor],
+    temperature: float | torch.Tensor,
+    top_p: float | torch.Tensor,
     past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None,
     cache_ring_buffer: KVCacheRingBuffer,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[RingKVCacheView]]:
@@ -492,17 +529,21 @@ def _parallel_block_draft(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: Union[float, torch.Tensor],
-    top_p: Union[float, torch.Tensor],
+    temperature: float | torch.Tensor,
+    top_p: float | torch.Tensor,
     rollback_chaos_threshold: float = 0.75,
 ) -> torch.Tensor:
-    lvl_2_tokens = torch.full((batch_size, len_lvl_2), model.cfg.pad_token_id, dtype=torch.long, device=device)
+    lvl_2_tokens = torch.full(
+        (batch_size, len_lvl_2), model.cfg.pad_token_id, dtype=torch.long, device=device
+    )
 
     for block_idx in range(block_count):
         start_idx = block_idx * block_size
         if start_idx >= len_lvl_2:
             break
-        end_idx = len_lvl_2 if block_idx == block_count - 1 else min(len_lvl_2, start_idx + block_size)
+        end_idx = (
+            len_lvl_2 if block_idx == block_count - 1 else min(len_lvl_2, start_idx + block_size)
+        )
         block_len = end_idx - start_idx
 
         chunk_inputs = torch.full(
@@ -541,8 +582,8 @@ def _inpaint_block_seams(
     cfg_scale: float,
     alpha: float,
     healthy_entropy_limit: float,
-    temperature: Union[float, torch.Tensor],
-    top_p: Union[float, torch.Tensor],
+    temperature: float | torch.Tensor,
+    top_p: float | torch.Tensor,
     seam_tokens: int = 3,
     max_seams_per_pass: int = 10,
 ) -> torch.Tensor:
@@ -575,8 +616,12 @@ def _inpaint_block_seams(
         left_per_row = seam_left.index_select(0, seam_ids)
         right_per_row = seam_right.index_select(0, seam_ids)
 
-        token_positions = torch.arange(seq_len, device=lvl_2_tokens.device, dtype=torch.long).unsqueeze(0)
-        seam_mask = (token_positions >= left_per_row.unsqueeze(1)) & (token_positions < right_per_row.unsqueeze(1))
+        token_positions = torch.arange(
+            seq_len, device=lvl_2_tokens.device, dtype=torch.long
+        ).unsqueeze(0)
+        seam_mask = (token_positions >= left_per_row.unsqueeze(1)) & (
+            token_positions < right_per_row.unsqueeze(1)
+        )
         pos_rows, pos_cols = torch.where(seam_mask)
         expanded[seam_mask] = model.cfg.mask_token_id
 
@@ -606,7 +651,9 @@ def _inpaint_block_seams(
     return stitched
 
 
-def _resolve_phase3_level2_length(*, full_lvl_2_len: int, nominal_lvl_1_len: int, actual_lvl_1_len: int) -> int:
+def _resolve_phase3_level2_length(
+    *, full_lvl_2_len: int, nominal_lvl_1_len: int, actual_lvl_1_len: int
+) -> int:
     """Resolve target level-2 length for phase 3 based on configured level capacities.
 
     Args:
@@ -644,8 +691,8 @@ def hybrid_cascade_decode(
     cfg_scale: float = 1.0,
     alpha: float = 1.0,
     healthy_entropy_limit: float = 1.5,
-    temperature: Union[float, torch.Tensor] = 1.0,
-    top_p: Union[float, torch.Tensor] = 1.0,
+    temperature: float | torch.Tensor = 1.0,
+    top_p: float | torch.Tensor = 1.0,
     min_block_size_lvl2: int = 16,
     max_seams_per_inpaint_pass: int = 10,
     bpe_chunk_length: int = 128,
@@ -664,7 +711,7 @@ def hybrid_cascade_decode(
             raise ValueError(f"prefix_inputs[{level_idx}] must be rank-2 tensor with shape (B, L).")
         if level_tokens.shape[0] != batch:
             raise ValueError(
-                f"prefix_inputs[{level_idx}] batch mismatch: expected {batch}, got {level_tokens.shape[0]}."
+                f"prefix_inputs[{level_idx}] batch mismatch: expected {batch}, got {level_tokens.shape[0]}."  # noqa: E501
             )
         if level_tokens.shape[1] > expected_len:
             raise ValueError(
@@ -720,7 +767,7 @@ def hybrid_cascade_decode(
     tokens_remaining = max(0, len_lvl_1 - lvl_1_sequence.shape[1])
     num_chunks = (tokens_remaining + chunk_size - 1) // chunk_size
     global_level_0_memory = out[0]
-    for chunk_idx in range(num_chunks):
+    for _chunk_idx in range(num_chunks):
         chunk_start = lvl_1_sequence.shape[1]
         chunk_end = min(len_lvl_1, chunk_start + chunk_size)
         for _ in range(chunk_start, chunk_end):
@@ -775,7 +822,9 @@ def hybrid_cascade_decode(
     block_count = max(1, min(actual_lvl_1_len, len_lvl_2 // min_block))
     block_size = max(min_block, len_lvl_2 // block_count)
 
-    print(f"[HYBRID] Фаза 3.1: Параллельный драфт ({block_count} блоков, block_size={block_size})...")
+    print(
+        f"[HYBRID] Фаза 3.1: Параллельный драфт ({block_count} блоков, block_size={block_size})..."
+    )
     try:
         lvl_2_draft = _parallel_block_draft(
             model,
@@ -792,7 +841,9 @@ def hybrid_cascade_decode(
             top_p=top_p,
         )
     except RollbackEvent as event:
-        print(f"[HYBRID] rollback block=[{event.block_start}, {event.block_end}) -> conservative resample")
+        print(
+            f"[HYBRID] rollback block=[{event.block_start}, {event.block_end}) -> conservative resample"  # noqa: E501
+        )
         try:
             lvl_2_draft = _parallel_block_draft(
                 model,

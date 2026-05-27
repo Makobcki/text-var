@@ -25,7 +25,9 @@ def _cross_entropy_per_token(
     flat_logits = logits.reshape(-1, logits.size(-1))
     flat_target = target.reshape(-1)
     ce_ignore_index = ignore_index if ignore_index is not None else -100
-    losses = F.cross_entropy(flat_logits, flat_target, reduction="none", ignore_index=ce_ignore_index)
+    losses = F.cross_entropy(
+        flat_logits, flat_target, reduction="none", ignore_index=ce_ignore_index
+    )
     return losses
 
 
@@ -43,6 +45,7 @@ def multiscale_next_scale_cross_entropy(
     historical_level0_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     precomputed_memories: list[torch.Tensor] | None = None
+
     def _weighted_token_loss(
         per_token_losses: torch.Tensor,
         *,
@@ -121,11 +124,15 @@ def multiscale_next_scale_cross_entropy(
             and prefix_inputs
             and historical_level0_tokens.numel() > 0
         ):
-            prefix_inputs = [torch.cat([historical_level0_tokens, prefix_inputs[0]], dim=1)] + prefix_inputs[1:]
+            prefix_inputs = [
+                torch.cat([historical_level0_tokens, prefix_inputs[0]], dim=1)
+            ] + prefix_inputs[1:]
         target = moved_tokens[target_idx]
         model_input = target
         mask_positions = None
-        effective_corruption_level = corruption_level_idx if corruption_level_idx >= 0 else (len(moved_tokens) - 1)
+        effective_corruption_level = (
+            corruption_level_idx if corruption_level_idx >= 0 else (len(moved_tokens) - 1)
+        )
         if target_idx < len(moved_tokens) - 1:
             bos = torch.full(
                 (batch_size, 1),
@@ -207,8 +214,12 @@ def multiscale_next_scale_cross_entropy(
                 loss_sum = loss_sum * 0.25
             weighted_norm = loss_norm * float(level_weight)
             weighted_sum = loss_sum * float(level_weight)
-            total_loss_sum = weighted_sum if total_loss_sum is None else (total_loss_sum + weighted_sum)
-            total_normalizer = weighted_norm if total_normalizer is None else (total_normalizer + weighted_norm)
+            total_loss_sum = (
+                weighted_sum if total_loss_sum is None else (total_loss_sum + weighted_sum)
+            )
+            total_normalizer = (
+                weighted_norm if total_normalizer is None else (total_normalizer + weighted_norm)
+            )
 
     if total_loss_sum is None or total_normalizer is None:
         reference = moved_tokens[0]

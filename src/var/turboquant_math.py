@@ -40,7 +40,9 @@ def generate_orthogonal_matrix(dim: int, device: torch.device) -> torch.Tensor:
     return q * phase
 
 
-def turboquant_compress(x: torch.Tensor, rotation: torch.Tensor, bits: int = 4) -> TurboQuantCompressed:
+def turboquant_compress(
+    x: torch.Tensor, rotation: torch.Tensor, bits: int = 4
+) -> TurboQuantCompressed:
     """Compress tensor with PolarQuant rotation and 1-bit QJL residual.
 
     Args:
@@ -76,4 +78,3 @@ def turboquant_decompress(compressed: TurboQuantCompressed, dtype: torch.dtype) 
     base = compressed.x_q.to(dtype) * compressed.scale.to(dtype)
     signs = torch.where(compressed.res_sign, 1.0, -1.0).to(dtype)
     return base + signs * compressed.res_scale.to(dtype)
-

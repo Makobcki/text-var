@@ -120,7 +120,7 @@ def test_load_tokenizer_sets_pad_to_eos_when_missing(monkeypatch, tmp_path: Path
             raise AssertionError("add_special_tokens should not be called when eos_token exists")
 
     tokenizer = _TokenizerWithoutPad()
-    monkeypatch.setattr("src.core.pipeline.PreTrainedTokenizerFast", lambda tokenizer_file: tokenizer)
+    monkeypatch.setattr("src.core.pipeline.PreTrainedTokenizerFast", lambda tokenizer_file: tokenizer)  # noqa: E501
 
     loaded = TextVARPipeline._load_tokenizer(tokenizer_file)
 
@@ -173,8 +173,8 @@ def test_load_var_uses_model_config(monkeypatch, tmp_path: Path) -> None:
 
     _ = TextVARPipeline(cfg)
     loaded_cfg = captured["cfg"]
-    assert getattr(loaded_cfg, "hidden_size") == 32
-    assert tuple(getattr(loaded_cfg, "level_lengths")) == (3, 4, 5)
+    assert loaded_cfg.hidden_size == 32
+    assert tuple(loaded_cfg.level_lengths) == (3, 4, 5)
 
 
 def test_vqvae_decode_from_semantic_indices_shape_and_bos() -> None:

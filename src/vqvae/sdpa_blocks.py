@@ -112,7 +112,9 @@ class SDPAEncoderLayer(nn.Module):
 class SDPAEncoder(nn.Module):
     """Encoder stack built from SDPAEncoderLayer blocks."""
 
-    def __init__(self, hidden: int, num_heads: int, depth: int, mlp_ratio: float, dropout: float = 0.1) -> None:
+    def __init__(
+        self, hidden: int, num_heads: int, depth: int, mlp_ratio: float, dropout: float = 0.1
+    ) -> None:
         """Initialize encoder stack.
 
         Args:
@@ -124,7 +126,12 @@ class SDPAEncoder(nn.Module):
         """
         super().__init__()
         self.layers = nn.ModuleList(
-            [SDPAEncoderLayer(hidden=hidden, num_heads=num_heads, mlp_ratio=mlp_ratio, dropout=dropout) for _ in range(int(depth))]
+            [
+                SDPAEncoderLayer(
+                    hidden=hidden, num_heads=num_heads, mlp_ratio=mlp_ratio, dropout=dropout
+                )
+                for _ in range(int(depth))
+            ]
         )
         self.norm = nn.LayerNorm(hidden)
 

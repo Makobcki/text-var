@@ -22,7 +22,7 @@ class DummyPipeline:
         self.calls.append((prompts, max_new_tokens, temperature, top_p, turboquant_kv))
         temperatures = per_item_temperatures or [temperature] * len(prompts)
         top_ps = per_item_top_ps or [top_p] * len(prompts)
-        return [f"{prompt}|{temp}|{tp}" for prompt, temp, tp in zip(prompts, temperatures, top_ps)]
+        return [f"{prompt}|{temp}|{tp}" for prompt, temp, tp in zip(prompts, temperatures, top_ps, strict=True)]  # noqa: E501
 
 
 def test_generate_batch_supports_mixed_sampling_settings() -> None:

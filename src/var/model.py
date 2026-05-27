@@ -7,8 +7,8 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from src.var.training.config import VARConfig
-from src.var.turboquant_triton import TurboQuantTritonInputs, turboquant_attention
 from src.var.turboquant_math import generate_orthogonal_matrix
+from src.var.turboquant_triton import TurboQuantTritonInputs, turboquant_attention
 
 if TYPE_CHECKING:
     from src.var.generator import TurboQuantCodec
@@ -34,12 +34,16 @@ class RingKVCacheView:
 
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim: int, max_position_embeddings: int = 32768, base: float = 10000.0) -> None:
+    def __init__(
+        self, dim: int, max_position_embeddings: int = 32768, base: float = 10000.0
+    ) -> None:
         super().__init__()
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim))
+        inv_freq = 1.0 / (
+            self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim)
+        )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
@@ -96,8 +100,12 @@ class SDPADecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(hidden)
         self.dropout = nn.Dropout(dropout)
         self.attention_dropout = float(dropout)
-        self.register_buffer("R_k", generate_orthogonal_matrix(self.head_dim, torch.device("cpu")), persistent=True)
-        self.register_buffer("R_v", generate_orthogonal_matrix(self.head_dim, torch.device("cpu")), persistent=True)
+        self.register_buffer(
+            "R_k", generate_orthogonal_matrix(self.head_dim, torch.device("cpu")), persistent=True
+        )
+        self.register_buffer(
+            "R_v", generate_orthogonal_matrix(self.head_dim, torch.device("cpu")), persistent=True
+        )
 
     def _shape_heads(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
@@ -153,10 +161,16 @@ class SDPADecoderLayer(nn.Module):
         past_key_value.values[:, write_ptr : write_ptr + 1, :, :] = qv
         new_length = min(past_key_value.keys.shape[1], past_key_value.current_length + 1)
         if new_length < past_key_value.keys.shape[1]:
-            ordered_positions = torch.arange(new_length, device=past_key_value.keys.device, dtype=torch.long)
+            ordered_positions = torch.arange(
+                new_length, device=past_key_value.keys.device, dtype=torch.long
+            )
         else:
             ordered_positions = (
-                torch.arange(past_key_value.keys.shape[1], device=past_key_value.keys.device, dtype=torch.long)
+                torch.arange(
+                    past_key_value.keys.shape[1],
+                    device=past_key_value.keys.device,
+                    dtype=torch.long,
+                )
                 + ((write_ptr + 1) % past_key_value.keys.shape[1])
             ) % past_key_value.keys.shape[1]
         staged = RingKVCacheView(
@@ -202,13 +216,23 @@ class SDPADecoderLayer(nn.Module):
             v = torch.cat([past_v, v], dim=1)
         present_key_value = (k, v)
         qh, kh, vh = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        can_use_turboquant = isinstance(past_key_value, RingKVCacheView) and past_key_value.codec is not None
-        if bool(getattr(self, "use_turboquant", False)) and can_use_turboquant and self_attn_mask is None:
+        can_use_turboquant = (
+            isinstance(past_key_value, RingKVCacheView) and past_key_value.codec is not None
+        )
+        if (
+            bool(getattr(self, "use_turboquant", False))
+            and can_use_turboquant
+            and self_attn_mask is None
+        ):
             assert past_key_value.codec is not None
             step_k = k[:, -1:, :, :]
             step_v = v[:, -1:, :, :]
-            pk, pv, ks, vs, ksign, vsign = self._append_turboquant_step(past_key_value, step_k, step_v)
-            qh = torch.einsum("blhd,df->blhf", q, self.R_k.to(q.device).transpose(0, 1)).transpose(1, 2)
+            pk, pv, ks, vs, ksign, vsign = self._append_turboquant_step(
+                past_key_value, step_k, step_v
+            )
+            qh = torch.einsum("blhd,df->blhf", q, self.R_k.to(q.device).transpose(0, 1)).transpose(
+                1, 2
+            )
             tq_inputs = TurboQuantTritonInputs(
                 q=qh,
                 k_quant=pk.transpose(1, 2).contiguous(),
@@ -297,7 +321,9 @@ class VARTransformer(nn.Module):
         )
         self.norm = nn.LayerNorm(hidden)
 
-        self.heads = nn.ModuleList([nn.Linear(hidden, vocab_size) for vocab_size in cfg.level_vocab_sizes])
+        self.heads = nn.ModuleList(
+            [nn.Linear(hidden, vocab_size) for vocab_size in cfg.level_vocab_sizes]
+        )
 
         self.early_exit_heads = nn.ModuleDict()
         for layer_idx in cfg.exit_layers:
@@ -327,7 +353,6 @@ class VARTransformer(nn.Module):
                 f"{source} contains out-of-range token ids for level {level_idx}: "
                 f"valid range is [0, {vocab_size - 1}], observed min={min_id}, max={max_id}."
             )
-
 
     def _compress_memory(self, x: torch.Tensor, target_tokens: int) -> torch.Tensor:
         seq_len = x.shape[1]
@@ -422,7 +447,9 @@ class VARTransformer(nn.Module):
             rotary_freqs_tgt = self.rotary_emb(emb, seq_len)
 
             x_scale = emb
-            use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
+            use_ckpt = (
+                bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
+            )
             local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
             for block in self.blocks:
                 if local_radius > 0 and seq_len > 1:
@@ -454,11 +481,19 @@ class VARTransformer(nn.Module):
                     )
 
             encoded = self.norm(x_scale)
-            compress_tokens = self.cfg.level_lengths[max(0, s_idx - 1)] if compact_memory_for_final_level else encoded.shape[1]
+            compress_tokens = (
+                self.cfg.level_lengths[max(0, s_idx - 1)]
+                if compact_memory_for_final_level
+                else encoded.shape[1]
+            )
             compressed = self._compress_memory(encoded, target_tokens=compress_tokens)
             last_scale_memory = compressed
-            current_context = self._maybe_turboquant_memory(torch.cat([null_mem, compressed], dim=1))
-            memories_by_target.append(self._maybe_turboquant_memory(torch.cat([null_mem, last_scale_memory], dim=1)))
+            current_context = self._maybe_turboquant_memory(
+                torch.cat([null_mem, compressed], dim=1)
+            )
+            memories_by_target.append(
+                self._maybe_turboquant_memory(torch.cat([null_mem, last_scale_memory], dim=1))
+            )
         return null_mem, memories_by_target
 
     def forward(
@@ -474,16 +509,36 @@ class VARTransformer(nn.Module):
         precomputed_final_memory: torch.Tensor | None = None,
         past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None = None,
         use_cache: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> (
+        torch.Tensor
+        | tuple[torch.Tensor, list[torch.Tensor]]
+        | tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]
+    ):
         if cfg_scale != 1.0 and prefix_inputs:
-            out_cond = self.forward(prefix_inputs, target_level=target_level, current_level_input=current_level_input, batch_size=batch_size, cfg_scale=1.0, return_early_outputs=return_early_outputs, compact_memory_for_final_level=compact_memory_for_final_level)
+            out_cond = self.forward(
+                prefix_inputs,
+                target_level=target_level,
+                current_level_input=current_level_input,
+                batch_size=batch_size,
+                cfg_scale=1.0,
+                return_early_outputs=return_early_outputs,
+                compact_memory_for_final_level=compact_memory_for_final_level,
+            )
             uncond_prefixes = [torch.zeros_like(p) for p in prefix_inputs]
-            out_uncond = self.forward(uncond_prefixes, target_level=target_level, current_level_input=current_level_input, batch_size=batch_size, cfg_scale=1.0, return_early_outputs=return_early_outputs, compact_memory_for_final_level=compact_memory_for_final_level)
+            out_uncond = self.forward(
+                uncond_prefixes,
+                target_level=target_level,
+                current_level_input=current_level_input,
+                batch_size=batch_size,
+                cfg_scale=1.0,
+                return_early_outputs=return_early_outputs,
+                compact_memory_for_final_level=compact_memory_for_final_level,
+            )
             if return_early_outputs:
                 logits_cond, early_cond = out_cond
                 logits_uncond, early_uncond = out_uncond
                 final_logits = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
-                final_early = [u + cfg_scale * (c - u) for c, u in zip(early_cond, early_uncond)]
+                final_early = [u + cfg_scale * (c - u) for c, u in zip(early_cond, early_uncond, strict=True)]  # noqa: E501
                 return final_logits, final_early
             return out_uncond + cfg_scale * (out_cond - out_uncond)
 
@@ -505,12 +560,13 @@ class VARTransformer(nn.Module):
         else:
             final_memory = precomputed_final_memory
         projected_final_memory = [
-            tuple(block.cross_kv(final_memory).chunk(2, dim=-1))
-            for block in self.blocks
+            tuple(block.cross_kv(final_memory).chunk(2, dim=-1)) for block in self.blocks
         ]
 
         if current_level_input is not None:
-            self._validate_token_ids(current_level_input, level_idx=target_idx, source="current_level_input")
+            self._validate_token_ids(
+                current_level_input, level_idx=target_idx, source="current_level_input"
+            )
             x = self.token_embeddings[target_idx](current_level_input)
             target_len = current_level_input.shape[1]
         else:
@@ -534,7 +590,9 @@ class VARTransformer(nn.Module):
 
         early_outputs = []
         present_key_values: list[tuple[torch.Tensor, torch.Tensor]] = []
-        use_ckpt = bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
+        use_ckpt = (
+            bool(self.cfg.gradient_checkpointing) and self.training and torch.is_grad_enabled()
+        )
         if use_cache and use_ckpt:
             raise ValueError("KV-cache is not supported with gradient checkpointing enabled.")
         for layer_idx, block in enumerate(self.blocks):

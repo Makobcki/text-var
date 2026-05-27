@@ -1,5 +1,4 @@
 import torch
-
 from src.var.generator import thermodynamic_sampling_with_stats
 
 

@@ -11,10 +11,10 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.request
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
-import urllib.request
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +63,9 @@ def configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=level, format=fmt)
 
 
-def _get_required_field(record: dict[str, object], field_names: Sequence[str], line_number: int) -> str:
+def _get_required_field(
+    record: dict[str, object], field_names: Sequence[str], line_number: int
+) -> str:
     """Get a required string field from a dataset record.
 
     Args:
@@ -140,20 +142,28 @@ def _build_problem(record: dict[str, object], line_number: int) -> BenchmarkProb
     else:
         task_id = f"line_{line_number}"
 
-    test_payload = next((record[key] for key in ("test", "test_code", "test_list", "tests") if key in record), None)
+    test_payload = next(
+        (record[key] for key in ("test", "test_code", "test_list", "tests") if key in record), None
+    )
     if test_payload is None:
         raise ValueError(f"Missing required test field at dataset line {line_number}")
     test_code = _normalize_test_code(test_payload)
 
     if any(key in record for key in ("entry_point", "function_name", "fn_name")):
-        entry_point = _get_required_field(record, ["entry_point", "function_name", "fn_name"], line_number)
+        entry_point = _get_required_field(
+            record, ["entry_point", "function_name", "fn_name"], line_number
+        )
     else:
         inferred_entry_point = _extract_entry_point_from_prompt(prompt)
         if inferred_entry_point is None:
-            raise ValueError(f"Missing entry point and could not infer from prompt at dataset line {line_number}")
+            raise ValueError(
+                f"Missing entry point and could not infer from prompt at dataset line {line_number}"
+            )
         entry_point = inferred_entry_point
 
-    return BenchmarkProblem(task_id=task_id, prompt=prompt, test_code=test_code, entry_point=entry_point)
+    return BenchmarkProblem(
+        task_id=task_id, prompt=prompt, test_code=test_code, entry_point=entry_point
+    )
 
 
 def load_jsonl_problems(dataset_path: Path) -> list[BenchmarkProblem]:
@@ -323,13 +333,12 @@ def _jsonl_persistent_sampler(command: str) -> Callable[[BenchmarkProblem, int],
             payload = json.loads(line)
             yield extract_code_from_text(str(payload.get("code", "")))
 
-
     def close() -> None:
         """Stop the persistent model process."""
         if proc.poll() is None:
             proc.terminate()
 
-    setattr(sampler, "close", close)
+    sampler.close = close
     return sampler
 
 

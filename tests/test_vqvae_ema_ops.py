@@ -1,5 +1,4 @@
 import torch
-
 from src.vqvae.ema_ops import _compute_row_l2_triton, ema_update_torch, ema_update_triton
 
 

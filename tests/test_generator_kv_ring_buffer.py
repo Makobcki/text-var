@@ -1,5 +1,4 @@
 import torch
-
 from src.var.generator import KVCacheRingBuffer, TurboQuantConfig
 from src.var.model import RingKVCacheView
 
@@ -64,7 +63,7 @@ def test_kv_ring_buffer_turboquant_compresses_to_uint8_and_materializes() -> Non
 
 
 def test_turboquant_stores_bitpacked_width() -> None:
-    ring = KVCacheRingBuffer(max_window=2, turboquant_config=TurboQuantConfig(key_bits=3, value_bits=4))
+    ring = KVCacheRingBuffer(max_window=2, turboquant_config=TurboQuantConfig(key_bits=3, value_bits=4))  # noqa: E501
     present = [(
         torch.ones((1, 1, 1, 8), dtype=torch.float32),
         torch.ones((1, 1, 1, 8), dtype=torch.float32),

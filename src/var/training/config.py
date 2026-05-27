@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from src.var.config import VARConfig
 
@@ -21,10 +21,10 @@ class TrainConfig:
     grad_clip_norm: float = 1.0
     save_every: int = 1000
     phase_steps: tuple[int, ...] = (5000, 5000)
-    level_weights: Optional[list[float]] = None
-    token_cache_path: Optional[Path] = None
+    level_weights: list[float] | None = None
+    token_cache_path: Path | None = None
     synthetic_count: int = 1000
-    token_metadata: Optional[Any] = None
+    token_metadata: Any | None = None
     corruption_level_idx: int = -1
     corruption_prob: float = 0.35
     corruption_span_min: int = 8
@@ -41,12 +41,12 @@ class TrainConfig:
     flash_cross_entropy: bool = True
     use_early_exit_loss: bool = False
     optimizer: Literal["adamw", "adamw8bit"] = "adamw"
-    resume_from: Optional[Path] = None
+    resume_from: Path | None = None
     validation_every: int = 0
     val_every: int = 0
     validation_batches: int = 8
     validation_split: float = 0.0
-    val_token_cache_path: Optional[Path] = None
+    val_token_cache_path: Path | None = None
     synthetic_val_count: int = 256
     tensorboard_enabled: bool = False
     log_dir: Path = Path("runs/var")
@@ -57,7 +57,7 @@ class TrainConfig:
     sample_max_new_tokens: int = 96
     wandb_enabled: bool = False
     wandb_project: str = "text-var"
-    wandb_run_name: Optional[str] = None
+    wandb_run_name: str | None = None
     unconditional_drop_prob: float = 0.1
     stateful_context_enabled: bool = False
     stateful_context_max_tokens: int = 0
@@ -82,7 +82,7 @@ class SampleConfig:
 
 
 def load_train_config(path: Path) -> TrainConfig:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     model_cfg_payload = dict(data.get("model", {}))
@@ -160,7 +160,7 @@ def load_train_config(path: Path) -> TrainConfig:
 
 
 def load_sample_config(path: Path) -> SampleConfig:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     return SampleConfig(

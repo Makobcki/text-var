@@ -1,6 +1,5 @@
 import torch
-from src.var.generator import hybrid_cascade_decode
-from src.var.generator import _resolve_phase3_level2_length
+from src.var.generator import _resolve_phase3_level2_length, hybrid_cascade_decode
 from src.var.training.config import VARConfig
 
 
@@ -73,16 +72,16 @@ def test_phase2_finished_rows_are_padded(monkeypatch) -> None:
     def _fake_decode_with_cache(**kwargs):
         del kwargs
         token = sampled_tokens.pop(0)
-        return token, torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32), []
+        return token, torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32), []  # noqa: E501
 
     def _fake_decode_no_cache(**kwargs):
         del kwargs
-        return torch.tensor([1, 1]), torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32)
+        return torch.tensor([1, 1]), torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32)  # noqa: E501
 
     monkeypatch.setattr("src.var.generator._decode_next_ar_token", _fake_decode_no_cache)
-    monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)
-    monkeypatch.setattr("src.var.generator._parallel_block_draft", lambda **kwargs: torch.zeros((2, kwargs["len_lvl_2"]), dtype=torch.long))
-    monkeypatch.setattr("src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"])
+    monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)  # noqa: E501
+    monkeypatch.setattr("src.var.generator._parallel_block_draft", lambda **kwargs: torch.zeros((2, kwargs["len_lvl_2"]), dtype=torch.long))  # noqa: E501
+    monkeypatch.setattr("src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"])  # noqa: E501
 
     output = hybrid_cascade_decode(model, batch_size=2, device=torch.device("cpu"))
     lvl1 = output[1]
@@ -120,7 +119,7 @@ def test_hybrid_cascade_decode_retries_twice_after_rollback(monkeypatch) -> None
         return torch.zeros((1, kwargs["len_lvl_2"]), dtype=torch.long)
 
     monkeypatch.setattr("src.var.generator._decode_next_ar_token", _fake_decode_no_cache)
-    monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)
+    monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)  # noqa: E501
     monkeypatch.setattr("src.var.generator._parallel_block_draft", _fake_parallel_block_draft)
     monkeypatch.setattr(
         "src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"]

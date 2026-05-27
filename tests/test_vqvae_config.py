@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-
 from src.vqvae.training.config import VQVAEConfigError, load_vqvae_train_config
 
 

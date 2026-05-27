@@ -8,8 +8,8 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
-from transformers import AutoTokenizer
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 from src.data.token_cache import TokenCacheMetadata
 
@@ -25,7 +25,9 @@ def _get_tokenizer(tokenizer_name: str, use_fast: bool):
     return tok
 
 
-def _fit_to_level(token_ids: list[int], *, length: int, vocab_size: int, pad_id: int = 0) -> list[int]:
+def _fit_to_level(
+    token_ids: list[int], *, length: int, vocab_size: int, pad_id: int = 0
+) -> list[int]:
     """Truncate/pad token sequence and clamp ids into target vocab range."""
     if vocab_size <= 1:
         raise ValueError("vocab_size must be > 1 for real tokenizer pipeline")
@@ -57,7 +59,11 @@ def _downsample(token_ids: list[int], stride: int) -> list[int]:
 
 
 def _encode_multiscale(
-    token_ids: list[int], *, level_lengths: tuple[int, ...], level_vocab_sizes: tuple[int, ...], eos_token_id: int
+    token_ids: list[int],
+    *,
+    level_lengths: tuple[int, ...],
+    level_vocab_sizes: tuple[int, ...],
+    eos_token_id: int,
 ) -> list[list[int]]:
     if len(level_lengths) != len(level_vocab_sizes):
         raise ValueError("level_lengths and level_vocab_sizes must have the same size.")
@@ -67,7 +73,7 @@ def _encode_multiscale(
     token_ids_with_eos = _append_eos(token_ids, eos_token_id=eos_token_id)
     level_count = len(level_lengths)
     encoded_levels: list[list[int]] = []
-    for level_idx, (level_length, vocab_size) in enumerate(zip(level_lengths, level_vocab_sizes)):
+    for level_idx, (level_length, vocab_size) in enumerate(zip(level_lengths, level_vocab_sizes, strict=True)):  # noqa: E501
         stride_power = max(0, level_count - level_idx - 1)
         stride = 2**stride_power
         encoded_levels.append(
@@ -83,7 +89,9 @@ def _encode_multiscale(
 def process_single_line(
     args_tuple: tuple[str, int, tuple[int, ...], tuple[int, ...], str, bool, int],
 ) -> dict[str, object]:
-    line, index, level_lengths, level_vocab_sizes, tokenizer_name, use_fast, eos_token_id = args_tuple
+    line, index, level_lengths, level_vocab_sizes, tokenizer_name, use_fast, eos_token_id = (
+        args_tuple
+    )
 
     payload = json.loads(line)
     text = str(payload.get("content", payload.get("text", ""))).strip()
@@ -97,13 +105,9 @@ def process_single_line(
 
     tokenizer = _get_tokenizer(tokenizer_name, use_fast)
     token_ids = tokenizer.encode(text, add_special_tokens=False)
-    
-    if eos_token_id is None:
-        if tokenizer.eos_token_id is not None:
-            eos_token_id = tokenizer.eos_token_id
-        else:
-            eos_token_id = 3 # fallback for custom tokenizer
 
+    if eos_token_id is None:
+        eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 3
 
     if not token_ids:
         return {
@@ -127,7 +131,9 @@ def process_single_line(
     }
 
 
-def _save_chunk_as_safetensors(chunk_path: Path, batch_entries: list[dict[str, object]], level_count: int) -> None:
+def _save_chunk_as_safetensors(
+    chunk_path: Path, batch_entries: list[dict[str, object]], level_count: int
+) -> None:
     """Persist one chunk in safetensors format using contiguous tensors.
 
     Args:
@@ -167,8 +173,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--level-lengths", type=int, nargs="+", default=(32, 128, 1024))
     parser.add_argument("--codebook-dim", type=int, default=256)
     parser.add_argument("--tokenizer-name", type=str, default="bert-base-uncased")
-    parser.add_argument("--eos-token-id", type=int, default=None, help="If not provided, uses tokenizer.eos_token_id")
-    parser.add_argument("--slow-tokenizer", action="store_true", help="Use python tokenizer instead of fast backend.")
+    parser.add_argument(
+        "--eos-token-id",
+        type=int,
+        default=None,
+        help="If not provided, uses tokenizer.eos_token_id",
+    )
+    parser.add_argument(
+        "--slow-tokenizer",
+        action="store_true",
+        help="Use python tokenizer instead of fast backend.",
+    )
     parser.add_argument(
         "--num-workers",
         type=int,
@@ -208,6 +223,7 @@ def main(argv: list[str] | None = None) -> None:
 
     def _handle_sigterm(signum, frame):
         raise KeyboardInterrupt()
+
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     def _init_worker():
@@ -218,8 +234,7 @@ def main(argv: list[str] | None = None) -> None:
     total_saved_docs = 0
 
     try:
-        with Pool(processes=num_workers, initializer=_init_worker) as pool:
-            with open(args.input, "r", encoding="utf-8") as f:
+        with Pool(processes=num_workers, initializer=_init_worker) as pool, open(args.input, encoding="utf-8") as f:  # noqa: E501
 
                 def argument_generator():
                     for idx, line in enumerate(f):
@@ -256,14 +271,18 @@ def main(argv: list[str] | None = None) -> None:
 
                     if len(current_batch) >= args.batch_size:
                         chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
-                        _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
+                        _save_chunk_as_safetensors(
+                            chunk_path, current_batch, len(metadata.level_lengths)
+                        )
 
                         current_batch = []
                         batch_index += 1
 
                 if current_batch:
                     chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
-                    _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
+                    _save_chunk_as_safetensors(
+                        chunk_path, current_batch, len(metadata.level_lengths)
+                    )
                     del current_batch
 
                 pbar.close()
@@ -276,7 +295,7 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("Input dataset is empty or contains no valid records.")
 
     print(
-        f"Успешно завершено! Сохранено {total_saved_docs:,} документов разбитых на {batch_index + 1} чанков в '{args.output_dir}'."
+        f"Успешно завершено! Сохранено {total_saved_docs:,} документов разбитых на {batch_index + 1} чанков в '{args.output_dir}'."  # noqa: E501
     )
 
 

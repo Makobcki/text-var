@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import torch
-
 from src.vqvae.infer_cli import InferConfig, _load_tokenizer, build_parser, run_roundtrip
 
 
@@ -31,7 +30,7 @@ class _FakeModel:
 
 def test_build_parser_accepts_required_args() -> None:
     parser = build_parser()
-    args = parser.parse_args(["--checkpoint", "model.pt", "--input", "hello", "--tokenizer", "gpt2"])
+    args = parser.parse_args(["--checkpoint", "model.pt", "--input", "hello", "--tokenizer", "gpt2"])  # noqa: E501
 
     assert args.checkpoint == Path("model.pt")
     assert args.input == "hello"

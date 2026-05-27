@@ -127,8 +127,12 @@ def rewrite_cache_with_vqvae(
 
             rewritten_target_rows: list[torch.Tensor] = []
             for row_idx in range(source_level_tokens.shape[0]):
-                source_tokens = source_level_tokens[row_idx].to(dtype=torch.long, device=dev).unsqueeze(0)
-                semantic_idx, _ = model.encode_sentence(source_tokens, padding_mask=source_tokens.eq(0))
+                source_tokens = (
+                    source_level_tokens[row_idx].to(dtype=torch.long, device=dev).unsqueeze(0)
+                )
+                semantic_idx, _ = model.encode_sentence(
+                    source_tokens, padding_mask=source_tokens.eq(0)
+                )
 
                 semantic_ids = semantic_idx.view(-1).to(dtype=torch.long, device="cpu")
                 expected_len = int(metadata.level_lengths[level_to])
@@ -141,7 +145,9 @@ def rewrite_cache_with_vqvae(
                 rewritten_target_rows.append(semantic_ids.to(dtype=torch.int32))
                 processed_entries += 1
 
-            payload[f"tokens_level_{level_to}"] = torch.stack(rewritten_target_rows, dim=0).contiguous()
+            payload[f"tokens_level_{level_to}"] = torch.stack(
+                rewritten_target_rows, dim=0
+            ).contiguous()
             save_file(payload, str(chunk_path))
             LOGGER.debug("Rewritten chunk: %s", chunk_path)
 
@@ -150,7 +156,9 @@ def rewrite_cache_with_vqvae(
 
 def main() -> None:
     """Parse CLI arguments and execute cache rewrite flow."""
-    parser = argparse.ArgumentParser(description="Rewrite lvl0 cache tokens using VQ-VAE semantic ids from lvl2")
+    parser = argparse.ArgumentParser(
+        description="Rewrite lvl0 cache tokens using VQ-VAE semantic ids from lvl2"
+    )
     parser.add_argument("--token-cache-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--level-from", type=int, default=2)

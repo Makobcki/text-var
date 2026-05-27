@@ -2,9 +2,12 @@ import json
 from pathlib import Path
 
 import torch
-
 from src.var.training.config import load_train_config
-from src.var.training.main import _compute_grad_norm, _compute_weight_norm, _generate_validation_sample
+from src.var.training.main import (
+    _compute_grad_norm,
+    _compute_weight_norm,
+    _generate_validation_sample,
+)
 
 
 def test_config_loads_monitoring_fields(tmp_path: Path) -> None:

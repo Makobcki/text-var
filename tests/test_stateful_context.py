@@ -1,5 +1,4 @@
 import torch
-
 from src.var.loss import multiscale_next_scale_cross_entropy
 
 
@@ -14,7 +13,7 @@ class _DummyModel:
         self.cfg = _DummyCfg()
         self.recorded_prefix_lengths = []
 
-    def __call__(self, prefix_inputs, *, target_level, current_level_input, batch_size, return_early_outputs):
+    def __call__(self, prefix_inputs, *, target_level, current_level_input, batch_size, return_early_outputs):  # noqa: E501
         if prefix_inputs:
             self.recorded_prefix_lengths.append(prefix_inputs[0].shape[1])
         vocab = 16

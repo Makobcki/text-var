@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 
-from src.var.benchmark_eval import extract_code_from_text, estimate_pass_at_k, evaluate_pass_at_k, BenchmarkProblem, _jsonl_persistent_sampler, load_jsonl_problems
+import pytest
+from src.var.benchmark_eval import (
+    BenchmarkProblem,
+    _jsonl_persistent_sampler,
+    estimate_pass_at_k,
+    evaluate_pass_at_k,
+    extract_code_from_text,
+    load_jsonl_problems,
+)
 
 
 def test_extract_code_from_markdown() -> None:
@@ -21,13 +28,13 @@ def test_evaluate_pass_at_k_end_to_end() -> None:
     def sampler(_: BenchmarkProblem, __: int) -> list[str]:
         return ["def mul(a,b):\n    return a*b"]
 
-    metrics = evaluate_pass_at_k([problem], sampler=sampler, n_samples=1, k_values=[1], sandbox_backend="host")
+    metrics = evaluate_pass_at_k([problem], sampler=sampler, n_samples=1, k_values=[1], sandbox_backend="host")  # noqa: E501
     assert metrics[1] == 1.0
 
 
 @pytest.mark.skip(reason="Persistent process lifecycle is environment-sensitive in CI")
 def test_jsonl_persistent_sampler() -> None:
-    command = "python -c \"import sys,json; [sys.stdout.write(json.dumps({'code':'def f():\\n    return 1'})+'\\n') or sys.stdout.flush() for _ in sys.stdin]\""
+    command = "python -c \"import sys,json; [sys.stdout.write(json.dumps({'code':'def f():\\n    return 1'})+'\\n') or sys.stdout.flush() for _ in sys.stdin]\""  # noqa: E501
     sampler = _jsonl_persistent_sampler(command)
     problem = BenchmarkProblem("t", "def f():", "assert f()==1", "f")
     out = list(sampler(problem, 2))
@@ -41,7 +48,7 @@ def test_jsonl_persistent_sampler() -> None:
 def test_load_jsonl_problems_supports_mbpp_alias_fields(tmp_path: Path) -> None:
     dataset = tmp_path / "mbpp.jsonl"
     dataset.write_text(
-        '{"id": 1, "prompt": "def add(a,b):", "test": "assert add(1,2)==3", "entry_point": "add"}\n',
+        '{"id": 1, "prompt": "def add(a,b):", "test": "assert add(1,2)==3", "entry_point": "add"}\n',  # noqa: E501
         encoding="utf-8",
     )
 
