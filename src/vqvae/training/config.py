@@ -45,6 +45,11 @@ class VQVAETrainConfig:
     pad_token_id: int = 0
     max_position_embeddings: int = 2048
     lr: float = 3e-4
+    weight_decay: float = 0.05
+    warmup_ratio: float = 0.05
+    min_lr_ratio: float = 0.1
+    scheduler_type: str = "cosine"
+    max_grad_norm: float = 1.0
     level_index: int = 2
     gradient_accumulation_steps: int = 1
     dataloader_num_workers: int = 4
@@ -99,42 +104,45 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         json.JSONDecodeError: If JSON is invalid.
     """
 
-    with path.open('r', encoding='utf-8') as file:
+    with path.open("r", encoding="utf-8") as file:
         data = json.load(file)
 
     if not isinstance(data, dict):
-        raise VQVAEConfigError('Top-level VQ-VAE config payload must be an object.')
+        raise VQVAEConfigError("Top-level VQ-VAE config payload must be an object.")
 
     return VQVAETrainConfig(
-        output=Path(_require_str(data, 'output')),
-        token_cache_dir=Path(_require_str(data, 'token_cache_dir')),
-        steps=int(data.get('steps', 500)),
-        batch_size=int(data.get('batch_size', 8)),
-        device=str(data.get('device', 'cuda')),
-        vocab_size=int(data.get('vocab_size', 0)),
-        hidden_size=int(data.get('hidden_size', 1024)),
-        num_semantic_tokens=int(
-            data.get('num_semantic_tokens', data.get('semantic_tokens', 4096))
-        ),
-        semantic_sequence_length=int(data.get('semantic_sequence_length', 1)),
-        pad_token_id=int(data.get('pad_token_id', 0)),
-        max_position_embeddings=int(data.get('max_position_embeddings', 2048)),
-        lr=float(data.get('lr', 3e-4)),
-        level_index=int(data.get('level_index', 2)),
-        gradient_accumulation_steps=int(data.get('gradient_accumulation_steps', 1)),
-        dataloader_num_workers=int(data.get('dataloader_num_workers', 4)),
-        dataloader_prefetch_factor=int(data.get('dataloader_prefetch_factor', 2)),
-        pin_memory=bool(data.get('pin_memory', True)),
-        use_torch_compile=bool(data.get('use_torch_compile', False)),
-        compile_mode=str(data.get('compile_mode', 'default')),
-        log_every_steps=int(data.get('log_every_steps', 10)),
-        verbose=bool(data.get('verbose', False)),
-        semantic_pad_token_id=int(data.get('semantic_pad_token_id', 0)),
-        use_triton_ema=bool(data.get('use_triton_ema', False)),
-        use_turboquant_kv=bool(data.get('use_turboquant_kv', False)),
-        turboquant_key_bits=int(data.get('turboquant_key_bits', 4)),
-        turboquant_value_bits=int(data.get('turboquant_value_bits', 4)),
-        turboquant_qjl_residual_scale=float(data.get('turboquant_qjl_residual_scale', 0.5)),
-        gradient_checkpointing=bool(data.get('gradient_checkpointing', False)),
-        use_rotary_embeddings=bool(data.get('use_rotary_embeddings', True)),
+        output=Path(_require_str(data, "output")),
+        token_cache_dir=Path(_require_str(data, "token_cache_dir")),
+        steps=int(data.get("steps", 500)),
+        batch_size=int(data.get("batch_size", 8)),
+        device=str(data.get("device", "cuda")),
+        vocab_size=int(data.get("vocab_size", 0)),
+        hidden_size=int(data.get("hidden_size", 1024)),
+        num_semantic_tokens=int(data.get("num_semantic_tokens", data.get("semantic_tokens", 4096))),
+        semantic_sequence_length=int(data.get("semantic_sequence_length", 1)),
+        pad_token_id=int(data.get("pad_token_id", 0)),
+        max_position_embeddings=int(data.get("max_position_embeddings", 2048)),
+        lr=float(data.get("lr", 3e-4)),
+        weight_decay=float(data.get("weight_decay", 0.05)),
+        warmup_ratio=float(data.get("warmup_ratio", 0.05)),
+        min_lr_ratio=float(data.get("min_lr_ratio", 0.1)),
+        scheduler_type=str(data.get("scheduler_type", "cosine")),
+        max_grad_norm=float(data.get("max_grad_norm", 1.0)),
+        level_index=int(data.get("level_index", 2)),
+        gradient_accumulation_steps=int(data.get("gradient_accumulation_steps", 1)),
+        dataloader_num_workers=int(data.get("dataloader_num_workers", 4)),
+        dataloader_prefetch_factor=int(data.get("dataloader_prefetch_factor", 2)),
+        pin_memory=bool(data.get("pin_memory", True)),
+        use_torch_compile=bool(data.get("use_torch_compile", False)),
+        compile_mode=str(data.get("compile_mode", "default")),
+        log_every_steps=int(data.get("log_every_steps", 10)),
+        verbose=bool(data.get("verbose", False)),
+        semantic_pad_token_id=int(data.get("semantic_pad_token_id", 0)),
+        use_triton_ema=bool(data.get("use_triton_ema", False)),
+        use_turboquant_kv=bool(data.get("use_turboquant_kv", False)),
+        turboquant_key_bits=int(data.get("turboquant_key_bits", 4)),
+        turboquant_value_bits=int(data.get("turboquant_value_bits", 4)),
+        turboquant_qjl_residual_scale=float(data.get("turboquant_qjl_residual_scale", 0.5)),
+        gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
+        use_rotary_embeddings=bool(data.get("use_rotary_embeddings", True)),
     )

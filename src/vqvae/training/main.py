@@ -118,6 +118,11 @@ def run_training(
     use_rotary_embeddings: bool = True,
     log_every_steps: int = 10,
     verbose: bool = False,
+    weight_decay: float = 0.05,
+    warmup_ratio: float = 0.05,
+    min_lr_ratio: float = 0.1,
+    scheduler_type: str = "cosine",
+    max_grad_norm: float = 1.0,
 ) -> Path:
     _configure_logging(verbose)
     if gradient_accumulation_steps <= 0:
@@ -164,12 +169,30 @@ def run_training(
 
     if use_torch_compile and hasattr(torch, "compile"):
         from src.core.optimization import setup_blackwell_autotune
+
         setup_blackwell_autotune(compile_mode=compile_mode)
         model = torch.compile(base_model, mode=compile_mode)
     else:
         model = base_model
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    from src.core.optimization import build_cosine_warmup_scheduler_lambda, configure_weight_decay
+
+    optim_groups = configure_weight_decay(model, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(optim_groups, lr=lr)
+
+    if scheduler_type == "onecycle":
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=lr, total_steps=steps, pct_start=warmup_ratio
+        )
+    else:
+        warmup_steps = int(steps * warmup_ratio)
+        _lr_lambda = build_cosine_warmup_scheduler_lambda(
+            max_steps=steps,
+            warmup_steps=warmup_steps,
+            min_lr_ratio=min_lr_ratio,
+        )
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
+
     ds = MultiscaleTokenChunkIterableDataset(
         chunk_paths=chunk_paths,
         metadata=metadata,
@@ -226,9 +249,10 @@ def run_training(
                     backward_time = time.perf_counter() - backward_start
                     micro_step += 1
                     if micro_step % gradient_accumulation_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                         optimizer_start = time.perf_counter()
                         optimizer.step()
+                        scheduler.step()
                         optimizer_time = time.perf_counter() - optimizer_start
                         optimizer.zero_grad(set_to_none=True)
                         step += 1
@@ -256,9 +280,10 @@ def run_training(
                 raise RuntimeError("No valid token entries were loaded from token cache.")
 
             if micro_step % gradient_accumulation_steps != 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                 optimizer_start = time.perf_counter()
                 optimizer.step()
+                scheduler.step()
                 optimizer_time = time.perf_counter() - optimizer_start
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
@@ -389,6 +414,11 @@ def main() -> None:
             use_rotary_embeddings=cfg.use_rotary_embeddings,
             log_every_steps=cfg.log_every_steps,
             verbose=cfg.verbose,
+            weight_decay=cfg.weight_decay,
+            warmup_ratio=cfg.warmup_ratio,
+            min_lr_ratio=cfg.min_lr_ratio,
+            scheduler_type=cfg.scheduler_type,
+            max_grad_norm=cfg.max_grad_norm,
         )
     except TrainingInterruptedError:
         CONSOLE.print("[yellow]Training interrupted gracefully.[/yellow]")
