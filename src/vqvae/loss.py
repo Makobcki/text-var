@@ -60,9 +60,9 @@ def token_level_contrastive_loss(
     batch_size, seq_len, dim = latents.shape
 
     # Flatten latents
-    flat_latents = latents.view(-1, dim)
+    flat_latents = latents.reshape(-1, dim)
     if mask is not None:
-        flat_mask = mask.view(-1)
+        flat_mask = mask.reshape(-1)
         valid_indices = torch.where(~flat_mask)[0]
         valid_latents = flat_latents[valid_indices]
     else:

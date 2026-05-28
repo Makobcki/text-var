@@ -63,6 +63,8 @@ def run_training(
     token_cache_dir: Path,
     *,
     steps: int = 500,
+    epochs: int = 0,
+    save_every: int = 1000,
     max_checkpoints: int = 3,
     batch_size: int = 8,
     vocab_size: int = 32000,
@@ -106,6 +108,9 @@ def run_training(
     if log_every_steps <= 0:
         CONSOLE.warning("log_every_steps must be greater than 0, setting to 1")
         log_every_steps = 1
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     chunk_paths, metadata = load_token_entries_from_directory(token_cache_dir)
     if not (0 <= int(level_index) < len(metadata.level_lengths)):
@@ -168,6 +173,14 @@ def run_training(
         is_cuda = dev.type == "cuda"
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, fused=is_cuda)
 
+    if epochs > 0:
+        # Оцениваем количество шагов
+        seq_per_chunk = 11000
+        total_seq = len(chunk_paths) * seq_per_chunk
+        estimated_steps_per_epoch = int(total_seq / (batch_size * gradient_accumulation_steps))
+        steps = max(1, estimated_steps_per_epoch * epochs)
+        CONSOLE.print(f"[VQVAE] Epochs mode enabled ({epochs} epochs). Estimated ~{steps} total steps.")
+
     if scheduler_type == "onecycle":
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=lr, total_steps=steps, pct_start=warmup_ratio
@@ -229,7 +242,9 @@ def run_training(
             SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=CONSOLE
         ) as progress:
             task_id = progress.add_task(f"Training VQ-VAE 0/{steps}", total=None)
-            while step < steps:
+            
+            completed_epochs = 0
+            while step < steps and (epochs == 0 or completed_epochs < epochs):
                 if ckpt_manager.stop_requested:
                     CONSOLE.print(f"[VQVAE] Graceful stop requested at step {step}. Saving checkpoint...")
                     payload = {
@@ -273,7 +288,10 @@ def run_training(
                         optimizer_time = time.perf_counter() - optimizer_start
                         optimizer.zero_grad(set_to_none=True)
                         step += 1
-                        progress.update(task_id, description=f"Training VQ-VAE {step}/{steps}")
+                        if epochs > 0:
+                            progress.update(task_id, description=f"Training VQ-VAE Epoch {completed_epochs+1}/{epochs} (Step {step}/{steps})")
+                        else:
+                            progress.update(task_id, description=f"Training VQ-VAE {step}/{steps}")
                         if step % log_every_steps == 0 or step == 1 or step == steps:
                             CONSOLE.print(
                                 step_logger.build_line(
@@ -296,8 +314,49 @@ def run_training(
                                 for k, v in loss_dict.items():
                                     tb_writer.add_scalar(f"train/{k}", float(v.item()), step)
                                 tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
+                        
+                        if save_every > 0 and step % save_every == 0:
+                            CONSOLE.print(f"[VQVAE] Auto-saving checkpoint at step {step}...")
+                            payload = {
+                                "model": base_model.state_dict(),
+                                "optimizer": optimizer.state_dict(),
+                                "scheduler": scheduler.state_dict(),
+                                "steps": step,
+                                "model_config": {
+                                    "vocab_size": int(base_model.vocab_size),
+                                    "hidden_size": int(base_model.hidden_size),
+                                    "num_semantic_tokens": int(base_model.quantizer.codebook_size),
+                                    "semantic_sequence_length": int(base_model.semantic_sequence_length),
+                                    "pad_token_id": int(base_model.pad_token_id),
+                                    "semantic_pad_token_id": int(base_model.semantic_pad_token_id),
+                                    "use_turboquant_kv": bool(base_model.use_turboquant_kv),
+                                    "turboquant_key_bits": int(base_model.turboquant_key_bits),
+                                    "turboquant_value_bits": int(base_model.turboquant_value_bits),
+                                    "turboquant_qjl_residual_scale": float(base_model.turboquant_qjl_residual_scale),
+                                    "gradient_checkpointing": bool(base_model.gradient_checkpointing),
+                                    "use_rotary_embeddings": bool(base_model.use_rotary_embeddings),
+                                    "use_unpadding": bool(base_model.use_unpadding),
+                                },
+                                "metadata": TokenCacheMetadata(
+                                    kind=metadata.kind,
+                                    level_vocab_sizes=(vocab_size,),
+                                    level_lengths=(metadata.level_lengths[level_index],),
+                                    codebook_dim=metadata.codebook_dim,
+                                    max_token_length=metadata.level_lengths[level_index],
+                                ).to_dict(),
+                                "source_token_cache": str(token_cache_dir),
+                                "level_index": int(level_index),
+                            }
+                            ckpt_manager.save(payload, step)
+
                     if step >= steps:
                         break
+                
+                # 1 эпоха завершена.
+                completed_epochs += 1
+                CONSOLE.print(f"[VQVAE] Finished {completed_epochs} full epoch(s) over the dataset.")
+                if epochs > 0 and completed_epochs >= epochs:
+                    break
 
             if not did_progress:
                 raise RuntimeError("No valid token entries were loaded from token cache.")
@@ -333,37 +392,38 @@ def run_training(
                             tb_writer.add_scalar(f"train/{k}", float(v.item()), step)
                         tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
         payload = {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "steps": step,
-                "model_config": {
-                    "vocab_size": int(base_model.vocab_size),
-                    "hidden_size": int(base_model.hidden_size),
-                    "num_semantic_tokens": int(base_model.quantizer.codebook_size),
-                    "semantic_sequence_length": int(base_model.semantic_sequence_length),
-                    "pad_token_id": int(base_model.pad_token_id),
-                    "semantic_pad_token_id": int(base_model.semantic_pad_token_id),
-                    "use_turboquant_kv": bool(base_model.use_turboquant_kv),
-                    "turboquant_key_bits": int(base_model.turboquant_key_bits),
-                    "turboquant_value_bits": int(base_model.turboquant_value_bits),
-                    "turboquant_qjl_residual_scale": float(
-                        base_model.turboquant_qjl_residual_scale
-                    ),
-                    "gradient_checkpointing": bool(base_model.gradient_checkpointing),
-                    "use_rotary_embeddings": bool(base_model.use_rotary_embeddings),
-                    "use_unpadding": bool(base_model.use_unpadding),
-                },
-                "metadata": TokenCacheMetadata(
-                    kind=metadata.kind,
-                    level_vocab_sizes=(vocab_size,),
-                    level_lengths=(metadata.level_lengths[level_index],),
-                    codebook_dim=metadata.codebook_dim,
-                    max_token_length=metadata.level_lengths[level_index],
-                ).to_dict(),
-                "source_token_cache": str(token_cache_dir),
-                "level_index": int(level_index),
-            }
+            "model": base_model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "steps": step,
+            "model_config": {
+                "vocab_size": int(base_model.vocab_size),
+                "hidden_size": int(base_model.hidden_size),
+                "num_semantic_tokens": int(base_model.quantizer.codebook_size),
+                "semantic_sequence_length": int(base_model.semantic_sequence_length),
+                "pad_token_id": int(base_model.pad_token_id),
+                "semantic_pad_token_id": int(base_model.semantic_pad_token_id),
+                "use_turboquant_kv": bool(base_model.use_turboquant_kv),
+                "turboquant_key_bits": int(base_model.turboquant_key_bits),
+                "turboquant_value_bits": int(base_model.turboquant_value_bits),
+                "turboquant_qjl_residual_scale": float(
+                    base_model.turboquant_qjl_residual_scale
+                ),
+                "gradient_checkpointing": bool(base_model.gradient_checkpointing),
+                "use_rotary_embeddings": bool(base_model.use_rotary_embeddings),
+                "use_unpadding": bool(base_model.use_unpadding),
+            },
+            "metadata": TokenCacheMetadata(
+                kind=metadata.kind,
+                level_vocab_sizes=(vocab_size,),
+                level_lengths=(metadata.level_lengths[level_index],),
+                codebook_dim=metadata.codebook_dim,
+                max_token_length=metadata.level_lengths[level_index],
+            ).to_dict(),
+            "source_token_cache": str(token_cache_dir),
+            "level_index": int(level_index),
+        }
+        
         ckpt_manager.save(payload, step)
         CONSOLE.print(f"[VQVAE] Final checkpoint saved: {output_path}")
         if tb_writer is not None:
@@ -388,6 +448,8 @@ def main() -> None:
             output=Path(args.output),
             token_cache_dir=Path(args.token_cache_dir),
             steps=args.steps,
+            epochs=args.epochs,
+            save_every=args.save_every,
             max_checkpoints=args.max_checkpoints,
             batch_size=args.batch_size,
             device=args.device,
@@ -421,9 +483,12 @@ def main() -> None:
         )
     try:
         run_training(
-            cfg.output,
-            cfg.token_cache_dir,
+            output_path=cfg.output,
+            token_cache_dir=cfg.token_cache_dir,
             steps=cfg.steps,
+            epochs=cfg.epochs,
+            save_every=cfg.save_every,
+            max_checkpoints=cfg.max_checkpoints,
             batch_size=cfg.batch_size,
             vocab_size=cfg.vocab_size,
             hidden_size=cfg.hidden_size,

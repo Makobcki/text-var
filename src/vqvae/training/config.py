@@ -36,6 +36,8 @@ class VQVAETrainConfig:
     output: Path
     token_cache_dir: Path
     steps: int = 500
+    epochs: int = 0
+    save_every: int = 1000
     max_checkpoints: int = 3
     batch_size: int = 8
     device: str = "cuda"
@@ -118,6 +120,8 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         output=Path(_require_str(data, "output")),
         token_cache_dir=Path(_require_str(data, "token_cache_dir")),
         steps=int(data.get("steps", 500)),
+        epochs=int(data.get("epochs", 0)),
+        save_every=int(data.get("save_every", 1000)),
         max_checkpoints=int(data.get("max_checkpoints", 3)),
         batch_size=int(data.get("batch_size", 8)),
         device=str(data.get("device", "cuda")),

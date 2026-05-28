@@ -106,6 +106,19 @@ class SemanticTextVQVAE(nn.Module):
         for layer in self.decoder_layers:
             layer.use_turboquant = self.use_turboquant_kv
 
+        # Initialize weights properly
+        self.apply(self._init_weights)
+        # Re-apply weight tying just in case
+        self.lm_head.weight = self.embedding.weight
+
+    def _init_weights(self, module: nn.Module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
     def _pool_to_semantic_length(self, sequence: torch.Tensor) -> torch.Tensor:
         """Сжимает последовательность в 4 раза с сохранением пространственной информации."""
         channel_first = sequence.transpose(1, 2)
@@ -353,9 +366,9 @@ class SemanticTextVQVAE(nn.Module):
         active_targets = bpe_tokens[:, 1:][valid_mask]
 
         # 1. Chunked & Fused Label Smoothing Reconstruction Loss
-        if HAS_LIGER and self.training:
-            liger_loss_fn = LigerFusedLinearCrossEntropyLoss(label_smoothing=0.1, reduction="mean")
-            recon_loss = liger_loss_fn(self.lm_head.weight, active_decoded, active_targets, bias=self.lm_head.bias)
+        if HAS_LIGER:
+            lce = LigerFusedLinearCrossEntropyLoss(label_smoothing=0.1)
+            recon_loss = lce(self.lm_head.weight, active_decoded, active_targets, bias=self.lm_head.bias)
             active_logits = torch.empty(0, device=active_decoded.device)
         else:
             chunk_size = 4096

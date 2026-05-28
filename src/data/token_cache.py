@@ -234,10 +234,16 @@ class MultiscaleTokenChunkIterableDataset(IterableDataset):
         Returns:
             List of chunk paths assigned to current DataLoader worker.
         """
+        paths = self.chunk_paths
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+            paths = paths[rank :: world_size]
+
         worker_info = get_worker_info()
         if worker_info is None:
-            return self.chunk_paths
-        return self.chunk_paths[worker_info.id :: worker_info.num_workers]
+            return paths
+        return paths[worker_info.id :: worker_info.num_workers]
 
     def _iter_chunk_entries(self, chunk_path: Path):
         """Yield entries from one chunk file.
