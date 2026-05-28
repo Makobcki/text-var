@@ -2,7 +2,6 @@ import argparse
 import glob
 import os
 import signal
-import sys
 
 from rich.console import Console
 from rich.theme import Theme
@@ -50,7 +49,7 @@ def parse_args():
         "--max_samples",
         type=int,
         default=None,
-        help="Ограничить количество сэмплов для обучения (спасает от OOM в Rust на огромных датасетах, рекомендуемое значение: 1000000 - 5000000)",
+        help="Ограничить количество сэмплов для обучения (спасает от OOM в Rust на огромных датасетах, рекомендуемое значение: 1000000 - 5000000)",  # noqa: E501
     )
     return parser.parse_args()
 
@@ -64,29 +63,29 @@ def main():
         # Сбор всех текстовых файлов
         files = glob.glob(os.path.join(args.data, "**/*.txt"), recursive=True)
         if not files:
-            console.print(f"[error]Ошибка:[/error] В директории {args.data} не найдено .txt файлов.")
+            console.print(f"[error]Ошибка:[/error] В директории {args.data} не найдено .txt файлов.")  # noqa: E501
             return
 
         console.print(f"[info]Найдено файлов для обучения:[/info] {len(files)}")
         console.print(
-            f"[info]Начинается обучение токенизатора из текстовых файлов[/info] (vocab_size={args.vocab_size})..."
+            f"[info]Начинается обучение токенизатора из текстовых файлов[/info] (vocab_size={args.vocab_size})..."  # noqa: E501
         )
         tokenizer = trainer.train_from_files(files)
 
     elif os.path.isfile(args.data) and args.data.endswith(".jsonl"):
         console.print(f"[info]Найдено .jsonl датасет:[/info] {args.data}")
-        console.print(f"[info]Начинается обучение токенизатора из JSONL[/info] (vocab_size={args.vocab_size})...")
+        console.print(f"[info]Начинается обучение токенизатора из JSONL[/info] (vocab_size={args.vocab_size})...")  # noqa: E501
 
         def get_jsonl_iterator(filepath, max_samples=None):
             # 1. Попытка использовать cuDF для батчевого стриминга (SoA + CUDA)
             try:
                 import cudf
-                console.print(f"[success]Оптимизация:[/success] используем [bold]cuDF (CUDA)[/bold] для батчевой загрузки {filepath}...")
+                console.print(f"[success]Оптимизация:[/success] используем [bold]cuDF (CUDA)[/bold] для батчевой загрузки {filepath}...")  # noqa: E501
                 def _cudf_iter():
                     import io
                     count = 0
                     chunk_bytes = 250 * 1024 * 1024  # 250MB
-                    with open(filepath, "r", encoding="utf-8") as f:
+                    with open(filepath, encoding="utf-8") as f:
                         while True:
                             # Читаем пачку строк (до ~250МБ). Чтение идет целыми строками.
                             lines = f.readlines(chunk_bytes)
@@ -94,9 +93,9 @@ def main():
                                 break
                             
                             try:
-                                # Отдаем текст в cuDF через StringIO (обход бага libcudf с byte_range)
-                                # Указываем compression="uncompressed", чтобы избежать ворнинга от libcudf
-                                chunk_df = cudf.read_json(io.StringIO("".join(lines)), lines=True, compression="uncompressed")
+                                # Отдаем текст в cuDF через StringIO (обход бага libcudf с byte_range)  # noqa: E501
+                                # Указываем compression="uncompressed", чтобы избежать ворнинга от libcudf  # noqa: E501
+                                chunk_df = cudf.read_json(io.StringIO("".join(lines)), lines=True, compression="uncompressed")  # noqa: E501
                                 if chunk_df.empty:
                                     continue
                                 
@@ -109,18 +108,18 @@ def main():
                                         if max_samples and count >= max_samples:
                                             return
                             except Exception as e:
-                                console.print(f"[warning]Предупреждение: ошибка чтения чанка cuDF:[/warning] {e}")
+                                console.print(f"[warning]Предупреждение: ошибка чтения чанка cuDF:[/warning] {e}")  # noqa: E501
                                 break
                 return _cudf_iter()
             except ImportError:
                 pass
             except Exception as e:
-                console.print(f"[warning]cuDF fallback (ошибка: {e}). Переход к Pandas...[/warning]")
+                console.print(f"[warning]cuDF fallback (ошибка: {e}). Переход к Pandas...[/warning]")  # noqa: E501
 
             # 2. Используем стриминг батчами через Pandas (CPU)
             try:
                 import pandas as pd
-                console.print(f"[success]Используем pandas[/success] для батчевого стриминга {filepath}...")
+                console.print(f"[success]Используем pandas[/success] для батчевого стриминга {filepath}...")  # noqa: E501
                 def _pandas_iter():
                     count = 0
                     # Увеличен батч для современных CPU
@@ -134,11 +133,11 @@ def main():
                                     return
                 return _pandas_iter()
             except ImportError:
-                console.print(f"[info]Используем стриминг через стандартный json для загрузки {filepath}...[/info]")
+                console.print(f"[info]Используем стриминг через стандартный json для загрузки {filepath}...[/info]")  # noqa: E501
                 import json
                 def _streaming_iter():
                     count = 0
-                    with open(filepath, "r", encoding="utf-8") as f:
+                    with open(filepath, encoding="utf-8") as f:
                         for line in f:
                             if not line.strip():
                                 continue
@@ -155,14 +154,14 @@ def main():
             get_jsonl_iterator(args.data, args.max_samples), length=args.max_samples
         )
     else:
-        console.print(f"[error]Ошибка:[/error] Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")
+        console.print(f"[error]Ошибка:[/error] Путь {args.data} должен быть либо директорией, либо .jsonl файлом.")  # noqa: E501
         return
 
     # Сохранение (создаст tokenizer.json, tokenizer_config.json, special_tokens_map.json)
     os.makedirs(args.save_dir, exist_ok=True)
     tokenizer.save_pretrained(args.save_dir)
     console.print(f"[success]Токенизатор успешно сохранен в директорию:[/success] {args.save_dir}")
-    console.print("[info]Теперь его можно загрузить в коде:[/info] [bold]PreTrainedTokenizerFast.from_pretrained('путь')[/bold]")
+    console.print("[info]Теперь его можно загрузить в коде:[/info] [bold]PreTrainedTokenizerFast.from_pretrained('путь')[/bold]")  # noqa: E501
 
 
 if __name__ == "__main__":
