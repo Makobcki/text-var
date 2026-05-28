@@ -11,56 +11,7 @@ from src.var.model import VARTransformer
 from src.var.training.config import VARConfig
 
 
-def _collect_rng_state() -> dict[str, Any]:
-    state: dict[str, Any] = {
-        "torch": torch.random.get_rng_state(),
-        "python": random.getstate(),
-        "numpy": np.random.get_state(),
-    }
-    if torch.cuda.is_available():
-        state["cuda"] = torch.cuda.get_rng_state_all()
-    return state
-
-
-def _restore_rng_state(state: dict[str, Any]) -> None:
-    if "torch" in state:
-        torch.random.set_rng_state(state["torch"])
-    if "python" in state:
-        random.setstate(state["python"])
-    if "numpy" in state:
-        np.random.set_state(state["numpy"])
-    if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
-
-
-def save_checkpoint(
-    path: str | Path,
-    *,
-    model: VARTransformer,
-    optimizer: torch.optim.Optimizer | None,
-    step: int,
-    loss: float,
-    scaler: torch.amp.GradScaler | None = None,
-    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
-) -> None:
-    ckpt_path = Path(path)
-    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {
-        "format": "md-var-checkpoint-v2",
-        "model_family": "var",
-        "model_config": model.cfg.to_dict(),
-        "model": model.state_dict(),
-        "step": int(step),
-        "loss": float(loss),
-        "rng_state": _collect_rng_state(),
-    }
-    if optimizer is not None:
-        payload["optimizer"] = optimizer.state_dict()
-    if scaler is not None:
-        payload["scaler"] = scaler.state_dict()
-    if scheduler is not None:
-        payload["scheduler"] = scheduler.state_dict()
-    torch.save(payload, ckpt_path)
+from src.core.checkpoint import restore_rng_state
 
 
 def load_checkpoint(
@@ -97,4 +48,4 @@ def restore_training_state(
         scheduler.load_state_dict(payload["scheduler"])
     rng_state = payload.get("rng_state")
     if isinstance(rng_state, dict):
-        _restore_rng_state(rng_state)
+        restore_rng_state(rng_state)

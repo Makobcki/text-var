@@ -15,7 +15,7 @@ from src.data.token_cache import (
     TokenCacheMetadata,
     load_token_entries_from_directory,
 )
-from src.vqvae.checkpoint import save_vqvae_checkpoint
+
 from src.vqvae.model import SemanticTextVQVAE
 from src.vqvae.training.cli import build_parser
 from src.vqvae.training.config import VQVAETrainConfig, load_vqvae_train_config
@@ -42,37 +42,7 @@ def _configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
 
-def _install_signal_handlers(stop_state: dict[str, bool]) -> dict[int, signal.Handlers]:
-    """Install SIGINT/SIGTERM handlers that request graceful stop.
-
-    Args:
-        stop_state: Mutable stop flag container.
-
-    Returns:
-        Previous signal handlers.
-    """
-
-    def _handle_signal(signum: int, _frame: object) -> None:
-        LOGGER.warning("Training stop requested by signal %s", signum)
-        stop_state["requested"] = True
-
-    previous = {
-        signal.SIGINT: signal.getsignal(signal.SIGINT),
-        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
-    }
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    return previous
-
-
-def _restore_signal_handlers(previous: dict[int, signal.Handlers]) -> None:
-    """Restore previous signal handlers.
-
-    Args:
-        previous: Previous signal handlers.
-    """
-    for signum, handler in previous.items():
-        signal.signal(signum, handler)
+from src.core.checkpoint import CheckpointManager
 
 
 def _collate_level(level_index: int):
@@ -93,6 +63,7 @@ def run_training(
     token_cache_dir: Path,
     *,
     steps: int = 500,
+    max_checkpoints: int = 3,
     batch_size: int = 8,
     vocab_size: int = 32000,
     hidden_size: int = 1024,
@@ -230,8 +201,7 @@ def run_training(
     loss = None
     step = 0
     micro_step = 0
-    stop_state: dict[str, bool] = {"requested": False}
-    previous_handlers = _install_signal_handlers(stop_state)
+    ckpt_manager = CheckpointManager(output_path.parent, max_to_keep=max_checkpoints, prefix=output_path.stem)
     optimizer.zero_grad(set_to_none=True)
 
     tb_writer = None
@@ -260,12 +230,20 @@ def run_training(
         ) as progress:
             task_id = progress.add_task(f"Training VQ-VAE 0/{steps}", total=None)
             while step < steps:
-                if stop_state["requested"]:
-                    raise TrainingInterruptedError("Training interrupted by signal.")
+                if ckpt_manager.stop_requested:
+                    CONSOLE.print(f"[VQVAE] Graceful stop requested at step {step}. Saving checkpoint...")
+                    payload = {
+                        "model": base_model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                        "steps": step,
+                    }
+                    ckpt_manager.save(payload, step)
+                    break
                 did_progress = False
                 for tokens, padding_mask in loader:
-                    if stop_state["requested"]:
-                        raise TrainingInterruptedError("Training interrupted by signal.")
+                    if ckpt_manager.stop_requested:
+                        break
                     did_progress = True
                     step_start = time.perf_counter()
                     transfer_start = time.perf_counter()
@@ -354,8 +332,7 @@ def run_training(
                         for k, v in loss_dict.items():
                             tb_writer.add_scalar(f"train/{k}", float(v.item()), step)
                         tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
-        save_vqvae_checkpoint(
-            {
+        payload = {
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -386,15 +363,14 @@ def run_training(
                 ).to_dict(),
                 "source_token_cache": str(token_cache_dir),
                 "level_index": int(level_index),
-            },
-            output_path,
-        )
-        CONSOLE.print(f"[VQVAE] checkpoint saved: {output_path}")
+            }
+        ckpt_manager.save(payload, step)
+        CONSOLE.print(f"[VQVAE] Final checkpoint saved: {output_path}")
         if tb_writer is not None:
             tb_writer.close()
         return output_path
     finally:
-        _restore_signal_handlers(previous_handlers)
+        ckpt_manager.restore_handlers()
 
 
 def main() -> None:
@@ -412,6 +388,7 @@ def main() -> None:
             output=Path(args.output),
             token_cache_dir=Path(args.token_cache_dir),
             steps=args.steps,
+            max_checkpoints=args.max_checkpoints,
             batch_size=args.batch_size,
             device=args.device,
             vocab_size=args.vocab_size,

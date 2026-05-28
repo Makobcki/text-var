@@ -20,6 +20,7 @@ class TrainConfig:
     max_steps: int = 10000
     grad_clip_norm: float = 1.0
     save_every: int = 1000
+    max_checkpoints: int = 3
     phase_steps: tuple[int, ...] = (5000, 5000)
     level_weights: list[float] | None = None
     token_cache_path: Path | None = None
@@ -113,6 +114,7 @@ def load_train_config(path: Path) -> TrainConfig:
         max_steps=int(data.get("max_steps", 10000)),
         grad_clip_norm=float(data.get("grad_clip_norm", 1.0)),
         save_every=int(data.get("save_every", 1000)),
+        max_checkpoints=int(data.get("max_checkpoints", 3)),
         phase_steps=tuple(int(v) for v in data.get("phase_steps", (5000, 5000))),
         level_weights=data.get("level_weights"),
         token_cache_path=Path(data["token_cache_path"]) if data.get("token_cache_path") else None,

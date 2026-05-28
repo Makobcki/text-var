@@ -24,7 +24,8 @@ from src.data.token_cache import (
     load_token_entries_from_directory,
     validate_tokenizer_metadata,
 )
-from src.var.checkpoint import load_checkpoint, restore_training_state, save_checkpoint
+from src.var.checkpoint import load_checkpoint, restore_training_state
+from src.core.checkpoint import CheckpointManager
 from src.var.loss import multiscale_next_scale_cross_entropy
 from src.var.model import VARTransformer
 from src.var.training.config import TrainConfig, load_train_config
@@ -362,10 +363,6 @@ def run_training(cfg: TrainConfig) -> Path:
         model.load_state_dict(loaded_model.state_dict())
         restore_training_state(payload, optimizer=optimizer, scaler=scaler, scheduler=scheduler)
         step = int(payload.get("step", 0))
-        phase_boundaries = [0]
-        for phase_steps in cfg.phase_steps:
-            phase_boundaries.append(phase_boundaries[-1] + int(phase_steps))
-        current_phase = 0
         for idx in range(len(phase_boundaries) - 1):
             if phase_boundaries[idx] <= step < phase_boundaries[idx + 1]:
                 current_phase = idx
@@ -373,6 +370,8 @@ def run_training(cfg: TrainConfig) -> Path:
         else:
             current_phase = len(cfg.phase_steps) - 1
         print(f"[TRAIN] Успешно продолжено с шага {step}")
+
+    ckpt_manager = CheckpointManager(cfg.checkpoint_path.parent, max_to_keep=cfg.max_checkpoints, prefix=cfg.checkpoint_path.stem)
     last_loss = 0.0
     phase_start = sum(int(phase_steps) for phase_steps in cfg.phase_steps[:current_phase])
     accumulated_steps_per_phase = max(0, step - phase_start)
@@ -543,16 +542,24 @@ def run_training(cfg: TrainConfig) -> Path:
                     if wandb_run is not None:
                         wandb_run.log({"samples/validation": generated_text}, step=step)
 
-            if should_step and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
-                save_checkpoint(
-                    cfg.checkpoint_path,
-                    model=model,
-                    optimizer=optimizer,
-                    step=step,
-                    loss=last_loss,
-                    scaler=scaler,
-                    scheduler=scheduler,
-                )
+            if (should_step and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0) or ckpt_manager.stop_requested:
+                if ckpt_manager.stop_requested:
+                    print(f"[VAR] Graceful stop requested at step {step}. Saving checkpoint...")
+                payload = {
+                    "format": "md-var-checkpoint-v2",
+                    "model_family": "var",
+                    "model_config": model.cfg.to_dict(),
+                    "model": model.state_dict(),
+                    "step": step,
+                    "loss": last_loss,
+                    "optimizer": optimizer.state_dict(),
+                    "scaler": scaler.state_dict() if scaler else None,
+                    "scheduler": scheduler.state_dict() if scheduler else None,
+                }
+                ckpt_manager.save(payload, step)
+                
+                if ckpt_manager.stop_requested:
+                    break
             if bool(cfg.stateful_context_enabled):
                 with torch.no_grad():
                     level0_tokens = moved_tokens[0].detach()
@@ -574,15 +581,19 @@ def run_training(cfg: TrainConfig) -> Path:
         if not saw_batch:
             raise RuntimeError("VAR training dataloader produced no batches.")
 
-    save_checkpoint(
-        cfg.checkpoint_path,
-        model=model,
-        optimizer=optimizer,
-        step=step,
-        loss=last_loss,
-        scaler=scaler,
-        scheduler=scheduler,
-    )
+    payload = {
+        "format": "md-var-checkpoint-v2",
+        "model_family": "var",
+        "model_config": model.cfg.to_dict(),
+        "model": model.state_dict(),
+        "step": step,
+        "loss": last_loss,
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict() if scaler else None,
+        "scheduler": scheduler.state_dict() if scheduler else None,
+    }
+    ckpt_manager.save(payload, step)
+    ckpt_manager.restore_handlers()
     if writer:
         writer.flush()
         writer.close()
