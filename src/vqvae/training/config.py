@@ -36,6 +36,7 @@ class VQVAETrainConfig:
     output: Path
     token_cache_dir: Path
     steps: int = 500
+    max_checkpoints: int = 3
     batch_size: int = 8
     device: str = "cuda"
     vocab_size: int = 0
@@ -44,9 +45,9 @@ class VQVAETrainConfig:
     semantic_sequence_length: int = 1
     pad_token_id: int = 0
     max_position_embeddings: int = 2048
-    lr: float = 3e-4
+    lr: float = 1.5e-4
     weight_decay: float = 0.05
-    warmup_ratio: float = 0.05
+    warmup_ratio: float = 0.1
     min_lr_ratio: float = 0.1
     scheduler_type: str = "cosine"
     optimizer_type: str = "adamw"
@@ -117,6 +118,7 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         output=Path(_require_str(data, "output")),
         token_cache_dir=Path(_require_str(data, "token_cache_dir")),
         steps=int(data.get("steps", 500)),
+        max_checkpoints=int(data.get("max_checkpoints", 3)),
         batch_size=int(data.get("batch_size", 8)),
         device=str(data.get("device", "cuda")),
         vocab_size=int(data.get("vocab_size", 0)),
