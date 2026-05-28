@@ -2,11 +2,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
+try:
+    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
+    HAS_LIGER = True
+except ImportError:
+    HAS_LIGER = False
 from vector_quantize_pytorch import FSQ
 
 from src.var.generator import KVCacheRingBuffer, TurboQuantConfig, thermodynamic_sampling_with_stats
 from src.var.model import RingKVCacheView, RotaryEmbedding, SDPADecoderLayer
-from src.vqvae.cnn_blocks import HierarchicalDownsample1D, HierarchicalUpsample1D
+from src.vqvae.cnn_blocks import HierarchicalDownsample1D
 from src.vqvae.loss import (
     contrastive_latent_loss,
     feature_matching_loss,
@@ -34,8 +40,8 @@ class SemanticTextVQVAE(nn.Module):
         turboquant_qjl_residual_scale: float = 0.5,
         gradient_checkpointing: bool = False,
         use_rotary_embeddings: bool = True,
-        use_triton_ema: bool = False,
         semantic_mask_prob: float = 0.15,
+        use_unpadding: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -50,8 +56,8 @@ class SemanticTextVQVAE(nn.Module):
         self.turboquant_qjl_residual_scale = float(turboquant_qjl_residual_scale)
         self.gradient_checkpointing = bool(gradient_checkpointing)
         self.use_rotary_embeddings = bool(use_rotary_embeddings)
-        self.use_triton_ema = bool(use_triton_ema)
         self.semantic_mask_prob = float(semantic_mask_prob)
+        self.use_unpadding = bool(use_unpadding)
 
         self.embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=self.pad_token_id)
         self.pos_embedding = nn.Embedding(self.max_position_embeddings, hidden_size)
@@ -62,17 +68,17 @@ class SemanticTextVQVAE(nn.Module):
             depth=4,
             mlp_ratio=4.0,
             dropout=0.1,
+            gradient_checkpointing=self.gradient_checkpointing,
+            use_unpadding=self.use_unpadding,
         )
 
         self.compression_rate = 4
 
         self.downsample = HierarchicalDownsample1D(
-            dim=hidden_size, compression_rate=self.compression_rate, num_blocks=2
+            dim=hidden_size, compression_rate=self.compression_rate, num_blocks=2, gradient_checkpointing=self.gradient_checkpointing
         )
 
-        self.upsample = HierarchicalUpsample1D(
-            dim=hidden_size, compression_rate=self.compression_rate, num_blocks=2
-        )
+
 
         # =====================================================================
         # 3. Finite Scalar Quantization (FSQ)
@@ -92,6 +98,8 @@ class SemanticTextVQVAE(nn.Module):
         )
         self.decoder_norm = nn.LayerNorm(hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
+        # Weight Tying: Share weights between embedding and lm_head
+        self.lm_head.weight = self.embedding.weight
         self.rotary_emb = RotaryEmbedding(
             dim=hidden_size // 8, max_position_embeddings=self.max_position_embeddings
         )
@@ -100,15 +108,11 @@ class SemanticTextVQVAE(nn.Module):
 
     def _pool_to_semantic_length(self, sequence: torch.Tensor) -> torch.Tensor:
         """Сжимает последовательность в 4 раза с сохранением пространственной информации."""
-        channel_first = sequence.transpose(1, 2).contiguous()
+        channel_first = sequence.transpose(1, 2)
         compressed = self.downsample(channel_first)
-        return compressed.transpose(1, 2).contiguous()
+        return compressed.transpose(1, 2)
 
-    def _expand_to_full_length(self, latents: torch.Tensor) -> torch.Tensor:
-        """Разжимает последовательность обратно в исходную длину."""
-        channel_first = latents.transpose(1, 2).contiguous()
-        expanded = self.upsample(channel_first)
-        return expanded.transpose(1, 2).contiguous()
+
 
     def _pool_semantic_tokens(
         self, encoded: torch.Tensor, padding_mask: torch.Tensor | None
@@ -122,12 +126,10 @@ class SemanticTextVQVAE(nn.Module):
         return self._pool_to_semantic_length(masked_encoded)
 
     def _pool_semantic_padding_mask(self, padding_mask: torch.Tensor) -> torch.Tensor:
-        """Pool token padding mask to semantic-token resolution using Max Pooling."""
-        pm_float = padding_mask.float().unsqueeze(1)
-        pooled = F.max_pool1d(
-            pm_float, kernel_size=self.compression_rate, stride=self.compression_rate
-        )
-        return pooled.squeeze(1) > 0.5
+        """Pool token padding mask to semantic-token resolution using Logical OR."""
+        seq_len = padding_mask.shape[1]
+        valid_len = (seq_len // self.compression_rate) * self.compression_rate
+        return padding_mask[:, :valid_len].view(padding_mask.shape[0], -1, self.compression_rate).any(dim=-1)
 
     def _apply_semantic_padding_mask(
         self,
@@ -158,8 +160,7 @@ class SemanticTextVQVAE(nn.Module):
             qjl_residual_scale=self.turboquant_qjl_residual_scale,
         )
 
-    def _build_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        return nn.Transformer.generate_square_subsequent_mask(int(seq_len), device=device)
+
 
     def _position_ids(self, seq_len: int, device: torch.device) -> torch.Tensor:
         if int(seq_len) > self.max_position_embeddings:
@@ -181,12 +182,10 @@ class SemanticTextVQVAE(nn.Module):
             raise ValueError("past_key_values length must match decoder layers.")
         hidden = tgt_emb
         present_key_values: list[tuple[torch.Tensor, torch.Tensor]] = []
-        self_attn_mask = (
-            None if incremental else self._build_causal_mask(tgt_emb.size(1), tgt_emb.device)
-        )
+        self_attn_mask = None
+        rotary_freqs_tgt = self.rotary_emb(tgt_emb, seq_len=tgt_emb.shape[1])
         for layer_idx, layer in enumerate(self.decoder_layers):
             layer_past = None if past_key_values is None else past_key_values[layer_idx]
-            rotary_freqs_tgt = self.rotary_emb(hidden, seq_len=hidden.shape[1])
             if self.gradient_checkpointing and self.training and layer_past is None:
                 hidden, present = checkpoint(
                     lambda a, b, c, layer_=layer: layer_(
@@ -220,12 +219,12 @@ class SemanticTextVQVAE(nn.Module):
         padding_mask = self._resolve_padding_mask(bpe_tokens, padding_mask)
         positions = self._position_ids(bpe_tokens.size(1), bpe_tokens.device)
         x = self.embedding(bpe_tokens) + self.pos_embedding(positions)
+        semantic_inputs = self._pool_semantic_tokens(x, padding_mask=padding_mask)
+        semantic_padding_mask = self._pool_semantic_padding_mask(padding_mask)
         rotary_freqs = (
-            self.rotary_emb(x, seq_len=x.shape[1]) if self.use_rotary_embeddings else None
+            self.rotary_emb(semantic_inputs, seq_len=semantic_inputs.shape[1]) if self.use_rotary_embeddings else None
         )
-        encoded = self.encoder(x, key_padding_mask=padding_mask, rotary_freqs=rotary_freqs)
-
-        semantic_inputs = self._pool_semantic_tokens(encoded, padding_mask=padding_mask)
+        semantic_inputs = self.encoder(semantic_inputs, key_padding_mask=semantic_padding_mask, rotary_freqs=rotary_freqs)
         projected_inputs = self.pre_quant_proj(semantic_inputs)
         _, indices = self.quantizer(projected_inputs)
         return indices, torch.tensor(0.0, device=indices.device)
@@ -314,13 +313,13 @@ class SemanticTextVQVAE(nn.Module):
 
         positions = self._position_ids(bpe_tokens.size(1), bpe_tokens.device)
         x = self.embedding(bpe_tokens) + self.pos_embedding(positions)
-        rotary_freqs = (
-            self.rotary_emb(x, seq_len=x.shape[1]) if self.use_rotary_embeddings else None
-        )
-        encoded = self.encoder(x, key_padding_mask=padding_mask, rotary_freqs=rotary_freqs)
-
-        semantic_inputs = self._pool_semantic_tokens(encoded, padding_mask=padding_mask)
+        semantic_inputs = self._pool_semantic_tokens(x, padding_mask=padding_mask)
         semantic_padding_mask = self._pool_semantic_padding_mask(padding_mask)
+
+        rotary_freqs = (
+            self.rotary_emb(semantic_inputs, seq_len=semantic_inputs.shape[1]) if self.use_rotary_embeddings else None
+        )
+        semantic_inputs = self.encoder(semantic_inputs, key_padding_mask=semantic_padding_mask, rotary_freqs=rotary_freqs)
 
         projected_inputs = self.pre_quant_proj(semantic_inputs)
         quantized_fsq, indices = self.quantizer(projected_inputs)
@@ -337,7 +336,7 @@ class SemanticTextVQVAE(nn.Module):
         if self.training and self.semantic_mask_prob > 0.0:
             rand_tensor = torch.rand(memory.shape[:2], device=memory.device)
             mlm_mask = (rand_tensor < self.semantic_mask_prob) & (~semantic_padding_mask)
-            memory[mlm_mask] = 0.0
+            memory = memory.masked_fill(mlm_mask.unsqueeze(-1), 0.0)
 
         decoded, _ = self._run_decoder(
             tgt_emb=tgt_emb,
@@ -345,18 +344,40 @@ class SemanticTextVQVAE(nn.Module):
             past_key_values=None,
             incremental=False,
         )
+        del memory
+        del tgt_emb
 
         valid_mask = ~padding_mask[:, :-1]
-
         active_decoded = decoded[valid_mask]
-        active_logits = self.lm_head(active_decoded)
-
+        del decoded
         active_targets = bpe_tokens[:, 1:][valid_mask]
 
-        # 1. Label Smoothing Reconstruction Loss
-        recon_loss = F.cross_entropy(
-            active_logits, active_targets, reduction="mean", label_smoothing=0.1
-        )
+        # 1. Chunked & Fused Label Smoothing Reconstruction Loss
+        if HAS_LIGER and self.training:
+            liger_loss_fn = LigerFusedLinearCrossEntropyLoss(label_smoothing=0.1, reduction="mean")
+            recon_loss = liger_loss_fn(self.lm_head.weight, active_decoded, active_targets, bias=self.lm_head.bias)
+            active_logits = torch.empty(0, device=active_decoded.device)
+        else:
+            chunk_size = 4096
+            if self.training and active_decoded.shape[0] > chunk_size:
+                recon_loss = torch.tensor(0.0, device=active_decoded.device)
+                def compute_chunk_loss(h, t):
+                    chunk_logits = self.lm_head(h)
+                    return F.cross_entropy(chunk_logits, t, reduction="sum", label_smoothing=0.1)
+                for i in range(0, active_decoded.shape[0], chunk_size):
+                    chunk_decoded = active_decoded[i:i+chunk_size]
+                    chunk_targets = active_targets[i:i+chunk_size]
+                    chunk_loss = checkpoint(compute_chunk_loss, chunk_decoded, chunk_targets, use_reentrant=False)
+                    recon_loss = recon_loss + chunk_loss
+                recon_loss = recon_loss / active_decoded.shape[0]
+                active_logits = torch.empty(0, device=active_decoded.device)
+            else:
+                active_logits = self.lm_head(active_decoded)
+                recon_loss = F.cross_entropy(
+                    active_logits, active_targets, reduction="mean", label_smoothing=0.1
+                )
+        
+        del active_decoded
 
         # 2. Latent Feature Matching Loss
         fm_loss = feature_matching_loss(semantic_inputs, quantized, mask=semantic_padding_mask)
@@ -374,13 +395,12 @@ class SemanticTextVQVAE(nn.Module):
             recon_loss + vq_loss + 0.5 * fm_loss + 0.1 * cl_loss + 0.1 * tl_cl_loss + 0.01 * kl_loss
         )
 
-        logits = torch.zeros(
-            bpe_tokens.size(0),
-            bpe_tokens.size(1) - 1,
-            self.vocab_size,
-            device=active_logits.device,
-            dtype=active_logits.dtype,
-        )
-        logits[valid_mask] = active_logits
+        loss_dict = {
+            "recon": recon_loss.detach(),
+            "fm": fm_loss.detach(),
+            "cl": cl_loss.detach(),
+            "tl": tl_cl_loss.detach(),
+            "kl": kl_loss.detach(),
+        }
 
-        return logits, total_loss
+        return active_logits, total_loss, loss_dict

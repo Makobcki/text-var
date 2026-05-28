@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 
 class ConvNeXT1DBlock(nn.Module):
@@ -9,11 +10,11 @@ class ConvNeXT1DBlock(nn.Module):
         super().__init__()
         # Depthwise convolution
         self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)
-        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        self.norm = nn.GroupNorm(1, dim, eps=1e-6)
         # Pointwise convolutions (inverted bottleneck)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)
+        self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=1)
         self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=1)
 
         # Drop path not strictly needed unless very deep, but adding for completeness
         self.drop_path_prob = drop_path
@@ -21,14 +22,10 @@ class ConvNeXT1DBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_x = x
         x = self.dwconv(x)
-        # Permute (B, C, L) -> (B, L, C) for LayerNorm and Linear layers
-        x = x.transpose(1, 2)
         x = self.norm(x)
         x = self.pwconv1(x)
         x = self.act(x)
         x = self.pwconv2(x)
-        # Permute back (B, L, C) -> (B, C, L)
-        x = x.transpose(1, 2)
 
         # Simple drop path for training if prob > 0
         if self.training and self.drop_path_prob > 0.0:
@@ -44,30 +41,22 @@ class ConvNeXT1DBlock(nn.Module):
 class HierarchicalDownsample1D(nn.Module):
     """Downsamples spatial dimension using a strided convolution followed by ConvNeXT blocks."""
 
-    def __init__(self, dim: int, compression_rate: int = 4, num_blocks: int = 2):
+    def __init__(self, dim: int, compression_rate: int = 4, num_blocks: int = 2, gradient_checkpointing: bool = False):
         super().__init__()
+        self.gradient_checkpointing = gradient_checkpointing
         self.down_conv = nn.Conv1d(
             in_channels=dim, out_channels=dim, kernel_size=compression_rate, stride=compression_rate
         )
-        self.blocks = nn.Sequential(*[ConvNeXT1DBlock(dim=dim) for _ in range(num_blocks)])
+        self.blocks = nn.ModuleList([ConvNeXT1DBlock(dim=dim) for _ in range(num_blocks)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.down_conv(x)
-        x = self.blocks(x)
+        use_ckpt = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
+        for block in self.blocks:
+            if use_ckpt:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
         return x
 
 
-class HierarchicalUpsample1D(nn.Module):
-    """Upsamples spatial dimension using ConvNeXT blocks followed by a transposed convolution."""
-
-    def __init__(self, dim: int, compression_rate: int = 4, num_blocks: int = 2):
-        super().__init__()
-        self.blocks = nn.Sequential(*[ConvNeXT1DBlock(dim=dim) for _ in range(num_blocks)])
-        self.up_conv = nn.ConvTranspose1d(
-            in_channels=dim, out_channels=dim, kernel_size=compression_rate, stride=compression_rate
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.blocks(x)
-        x = self.up_conv(x)
-        return x

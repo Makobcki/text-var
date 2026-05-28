@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.utils.checkpoint import checkpoint
+
 from src.var.model import apply_rotary_pos_emb
 
 
@@ -38,7 +40,6 @@ class SDPAEncoderLayer(nn.Module):
             nn.Linear(ff_hidden, self.hidden),
         )
         self.norm1 = nn.LayerNorm(self.hidden)
-        self.norm2 = nn.LayerNorm(self.hidden)
         self.dropout = nn.Dropout(dropout)
 
     def _shape_heads(self, x: torch.Tensor) -> torch.Tensor:
@@ -47,7 +48,7 @@ class SDPAEncoderLayer(nn.Module):
 
     def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, num_heads, seq_len, head_dim = x.shape
-        return x.transpose(1, 2).contiguous().view(batch_size, seq_len, num_heads * head_dim)
+        return x.transpose(1, 2).reshape(batch_size, seq_len, num_heads * head_dim)
 
     def _build_padding_mask(
         self,
@@ -72,6 +73,7 @@ class SDPAEncoderLayer(nn.Module):
         *,
         key_padding_mask: torch.Tensor | None = None,
         rotary_freqs: torch.Tensor | None = None,
+        unpad_info: tuple | None = None,
     ) -> torch.Tensor:
         """Run encoder layer forward pass.
 
@@ -86,34 +88,61 @@ class SDPAEncoderLayer(nn.Module):
         x1 = self.norm1(x)
         qkv = self.qkv(x1)
         q, k, v = qkv.chunk(3, dim=-1)
-        q = q.view(x.shape[0], x.shape[1], self.num_heads, self.head_dim)
-        k = k.view(x.shape[0], x.shape[1], self.num_heads, self.head_dim)
-        if rotary_freqs is not None:
-            q, k = apply_rotary_pos_emb(q, k, rotary_freqs)
-        q = q.reshape(x.shape[0], x.shape[1], self.hidden)
-        k = k.reshape(x.shape[0], x.shape[1], self.hidden)
-        qh = self._shape_heads(q)
-        kh = self._shape_heads(k)
-        vh = self._shape_heads(v)
-        attn_mask = self._build_padding_mask(key_padding_mask)
-        attn = F.scaled_dot_product_attention(
-            qh,
-            kh,
-            vh,
-            attn_mask=attn_mask,
-            dropout_p=self.attn_dropout if self.training else 0.0,
-            is_causal=False,
-        )
-        x = x + self.dropout(self.out_proj(self._merge_heads(attn)))
-        x2 = self.norm2(x)
-        return x + self.dropout(self.ffn(x2))
+
+        if unpad_info is not None:
+            indices, cu_seqlens, max_seqlen_in_batch, total_tokens, _ = unpad_info
+            q = q.view(1, total_tokens, self.num_heads, self.head_dim)
+            k = k.view(1, total_tokens, self.num_heads, self.head_dim)
+            v = v.view(1, total_tokens, self.num_heads, self.head_dim)
+            if rotary_freqs is not None:
+                q, k = apply_rotary_pos_emb(q, k, rotary_freqs)
+            
+            from flash_attn import flash_attn_varlen_func
+            q_var = q.squeeze(0)
+            k_var = k.squeeze(0)
+            v_var = v.squeeze(0)
+            
+            attn = flash_attn_varlen_func(
+                q_var, k_var, v_var,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen_in_batch,
+                max_seqlen_k=max_seqlen_in_batch,
+                dropout_p=self.attn_dropout if self.training else 0.0,
+                causal=False,
+            )
+            attn = attn.view(1, total_tokens, self.hidden)
+            attn_out = self.dropout(self.out_proj(attn))
+        else:
+            q = q.view(x.shape[0], x.shape[1], self.num_heads, self.head_dim)
+            k = k.view(x.shape[0], x.shape[1], self.num_heads, self.head_dim)
+            if rotary_freqs is not None:
+                q, k = apply_rotary_pos_emb(q, k, rotary_freqs)
+            q = q.reshape(x.shape[0], x.shape[1], self.hidden)
+            k = k.reshape(x.shape[0], x.shape[1], self.hidden)
+            qh = self._shape_heads(q)
+            kh = self._shape_heads(k)
+            vh = self._shape_heads(v)
+            attn_mask = self._build_padding_mask(key_padding_mask)
+            attn = F.scaled_dot_product_attention(
+                qh,
+                kh,
+                vh,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_dropout if self.training else 0.0,
+                is_causal=False,
+            )
+            attn_out = self.dropout(self.out_proj(self._merge_heads(attn)))
+        
+        ffn_out = self.dropout(self.ffn(x1))
+        return x + attn_out + ffn_out
 
 
 class SDPAEncoder(nn.Module):
     """Encoder stack built from SDPAEncoderLayer blocks."""
 
     def __init__(
-        self, hidden: int, num_heads: int, depth: int, mlp_ratio: float, dropout: float = 0.1
+        self, hidden: int, num_heads: int, depth: int, mlp_ratio: float, dropout: float = 0.1, gradient_checkpointing: bool = False, use_unpadding: bool = False
     ) -> None:
         """Initialize encoder stack.
 
@@ -125,6 +154,8 @@ class SDPAEncoder(nn.Module):
             dropout: Dropout probability.
         """
         super().__init__()
+        self.gradient_checkpointing = gradient_checkpointing
+        self.use_unpadding = use_unpadding
         self.layers = nn.ModuleList(
             [
                 SDPAEncoderLayer(
@@ -152,7 +183,43 @@ class SDPAEncoder(nn.Module):
         Returns:
             Encoded tensor of shape ``(B, T, H)``.
         """
+        unpad_info = None
+        if self.use_unpadding and key_padding_mask is not None:
+            try:
+                from flash_attn.bert_padding import unpad_input, pad_input
+                attention_mask = (~key_padding_mask).long()
+                x_unpad, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(x, attention_mask)
+                x = x_unpad.unsqueeze(0)
+                unpad_info = (indices, cu_seqlens, max_seqlen_in_batch, x.shape[1], attention_mask)
+
+                if rotary_freqs is not None:
+                    freqs_expanded = rotary_freqs.unsqueeze(0).expand(key_padding_mask.shape[0], -1, -1)
+                    freqs_unpad, _, _, _ = unpad_input(freqs_expanded, attention_mask)
+                    rotary_freqs = freqs_unpad
+            except ImportError:
+                pass
+
+        use_ckpt = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         hidden = x
         for layer in self.layers:
-            hidden = layer(hidden, key_padding_mask=key_padding_mask, rotary_freqs=rotary_freqs)
-        return self.norm(hidden)
+            if use_ckpt:
+                hidden = checkpoint(
+                    layer,
+                    hidden,
+                    use_reentrant=False,
+                    key_padding_mask=key_padding_mask,
+                    rotary_freqs=rotary_freqs,
+                    unpad_info=unpad_info,
+                )
+            else:
+                hidden = layer(hidden, key_padding_mask=key_padding_mask, rotary_freqs=rotary_freqs, unpad_info=unpad_info)
+        
+        hidden = self.norm(hidden)
+
+        if unpad_info is not None:
+            from flash_attn.bert_padding import pad_input
+            indices, cu_seqlens, max_seqlen_in_batch, total_tokens, attention_mask = unpad_info
+            hidden_squeeze = hidden.squeeze(0)
+            hidden = pad_input(hidden_squeeze, indices, key_padding_mask.shape[0], key_padding_mask.shape[1])
+
+        return hidden

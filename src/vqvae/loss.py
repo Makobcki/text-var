@@ -21,7 +21,7 @@ def feature_matching_loss(
     if mask is not None:
         valid_mask = (~mask).unsqueeze(-1).float()
         loss = loss * valid_mask
-        return loss.sum() / (valid_mask.sum() + 1e-8)
+        return loss.sum() / (valid_mask.sum() * loss.size(-1) + 1e-8)
     return loss.mean()
 
 
@@ -94,7 +94,7 @@ def token_level_contrastive_loss(
 
 def kl_divergence_loss(latents: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
     """Compute KL-divergence penalty against a standard normal prior N(0, I)."""
-    loss = 0.5 * latents.pow(2).sum(dim=-1)
+    loss = 0.5 * latents.pow(2).mean(dim=-1)
     if mask is not None:
         valid_mask = (~mask).float()
         loss = loss * valid_mask

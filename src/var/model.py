@@ -96,8 +96,6 @@ class SDPADecoderLayer(nn.Module):
         )
 
         self.norm1 = nn.LayerNorm(hidden)
-        self.norm2 = nn.LayerNorm(hidden)
-        self.norm3 = nn.LayerNorm(hidden)
         self.dropout = nn.Dropout(dropout)
         self.attention_dropout = float(dropout)
         self.register_buffer(
@@ -113,7 +111,7 @@ class SDPADecoderLayer(nn.Module):
 
     def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, num_heads, seq_len, head_dim = x.shape
-        return x.transpose(1, 2).contiguous().view(batch_size, seq_len, num_heads * head_dim)
+        return x.transpose(1, 2).reshape(batch_size, seq_len, num_heads * head_dim)
 
     def _compress_memory(self, x: torch.Tensor, target_tokens: int) -> torch.Tensor:
         seq_len = x.shape[1]
@@ -266,10 +264,9 @@ class SDPADecoderLayer(nn.Module):
                 dropout_p=self.attention_dropout if self.training else 0.0,
                 is_causal=self_is_causal and self_attn_mask is None,
             )
-        x = x + self.dropout(self.self_out(self._merge_heads(self_attn)))
+        self_attn_out = self.dropout(self.self_out(self._merge_heads(self_attn)))
 
-        x2 = self.norm2(x)
-        cq = self.cross_q(x2)
+        cq = self.cross_q(x1)
         if cross_kv_memory is None:
             ckv = self.cross_kv(memory)
             ck, cv = ckv.chunk(2, dim=-1)
@@ -284,10 +281,10 @@ class SDPADecoderLayer(nn.Module):
             dropout_p=self.attention_dropout if self.training else 0.0,
             is_causal=False,
         )
-        x = x + self.dropout(self.cross_out(self._merge_heads(cross_attn)))
+        cross_attn_out = self.dropout(self.cross_out(self._merge_heads(cross_attn)))
 
-        x3 = self.norm3(x)
-        x = x + self.dropout(self.ffn(x3))
+        ffn_out = self.dropout(self.ffn(x1))
+        x = x + self_attn_out + cross_attn_out + ffn_out
         return x, present_key_value
 
 
