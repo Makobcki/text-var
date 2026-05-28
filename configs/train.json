@@ -7,6 +7,7 @@
   "max_steps": 90000,
   "grad_clip_norm": 0.5,
   "save_every": 4000,
+  "max_checkpoints": 5,
   "checkpoint_path": "checkpoints/var_mbpp.pt",
   "phase_steps": [30000, 30000, 30000],
   "level_weights": [1.0, 1.0, 1.0],

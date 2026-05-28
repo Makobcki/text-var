@@ -2,6 +2,7 @@
   "output": "checkpoints/vqvae.pt",
   "token_cache_dir": "dataset",
   "steps": 25000,
+  "max_checkpoints": 5,
   "batch_size": 10,
   "device": "cuda",
   "vocab_size": 32000,
