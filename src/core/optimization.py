@@ -22,7 +22,7 @@ def setup_blackwell_autotune(compile_mode: str = "default"):
     # Enable aggressive autotuning for matrix multiplications and pointwise ops
     inductor_config.max_autotune = True
     inductor_config.max_autotune_pointwise = True
-    inductor_config.max_autotune_gemm_backends = "TRITON"
+    inductor_config.max_autotune_gemm_backends = "ATEN,TRITON"
 
     # Coordinate descent tuning (finds optimal tile sizes on Blackwell)
     inductor_config.coordinate_descent_tuning = True
@@ -30,9 +30,9 @@ def setup_blackwell_autotune(compile_mode: str = "default"):
     # Use cudagraph trees to dramatically reduce CPU overhead for large graphs
     inductor_config.triton.cudagraph_trees = True
 
-    # Enable multi-kernel generation (useful for autotuning)
+    # Disable multi-kernel generation to avoid Triton JIT TypeError
     if hasattr(inductor_config.triton, "multi_kernel"):
-        inductor_config.triton.multi_kernel = 1
+        inductor_config.triton.multi_kernel = 0
 
     # Enable Tensor Memory Accelerator (TMA) which was introduced in Hopper
     # and heavily extended in Blackwell for asynchronous global-to-shared memory copies.
