@@ -11,7 +11,7 @@ except ImportError:
 from vector_quantize_pytorch import FSQ
 
 from src.var.generator import KVCacheRingBuffer, TurboQuantConfig, thermodynamic_sampling_with_stats
-from src.var.model import RingKVCacheView, RotaryEmbedding, SDPADecoderLayer
+from src.var.model import RingKVCacheView, RotaryEmbedding, SDPADecoderLayer, RMSNorm
 from src.vqvae.cnn_blocks import HierarchicalDownsample1D
 from src.vqvae.loss import (
     contrastive_latent_loss,
@@ -96,7 +96,7 @@ class SemanticTextVQVAE(nn.Module):
                 for _ in range(4)
             ]
         )
-        self.decoder_norm = nn.LayerNorm(hidden_size)
+        self.decoder_norm = RMSNorm(hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size)
         # Weight Tying: Share weights between embedding and lm_head
         self.lm_head.weight = self.embedding.weight

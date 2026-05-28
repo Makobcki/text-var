@@ -71,6 +71,28 @@ def apply_rotary_pos_emb(
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
+        return self.weight * x
+
+class SwiGLU(nn.Module):
+    def __init__(self, in_features: int, hidden_features: int, out_features: int, dropout: float = 0.0):
+        super().__init__()
+        self.w1 = nn.Linear(in_features, hidden_features, bias=False)
+        self.w2 = nn.Linear(in_features, hidden_features, bias=False)
+        self.w3 = nn.Linear(hidden_features, out_features, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+
 
 class SDPADecoderLayer(nn.Module):
     def __init__(self, hidden: int, num_heads: int, mlp_ratio: float, dropout: float = 0.1) -> None:
@@ -87,15 +109,10 @@ class SDPADecoderLayer(nn.Module):
         self.self_out = nn.Linear(hidden, hidden)
         self.cross_out = nn.Linear(hidden, hidden)
 
-        ff_hidden = max(hidden, int(hidden * float(mlp_ratio)))
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden, ff_hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_hidden, hidden),
-        )
+        ff_hidden = max(hidden, int(hidden * float(mlp_ratio) * 2 / 3))
+        self.ffn = SwiGLU(hidden, ff_hidden, hidden, dropout)
 
-        self.norm1 = nn.LayerNorm(hidden)
+        self.norm1 = RMSNorm(hidden)
         self.dropout = nn.Dropout(dropout)
         self.attention_dropout = float(dropout)
         self.register_buffer(
@@ -316,7 +333,7 @@ class VARTransformer(nn.Module):
                 for _ in range(int(cfg.depth))
             ]
         )
-        self.norm = nn.LayerNorm(hidden)
+        self.norm = RMSNorm(hidden)
 
         self.heads = nn.ModuleList(
             [nn.Linear(hidden, vocab_size) for vocab_size in cfg.level_vocab_sizes]

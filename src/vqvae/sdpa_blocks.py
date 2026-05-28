@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from torch.utils.checkpoint import checkpoint
 
-from src.var.model import apply_rotary_pos_emb
+from src.var.model import apply_rotary_pos_emb, RMSNorm, SwiGLU
 
 
 class SDPAEncoderLayer(nn.Module):
@@ -32,14 +32,9 @@ class SDPAEncoderLayer(nn.Module):
 
         self.qkv = nn.Linear(self.hidden, self.hidden * 3)
         self.out_proj = nn.Linear(self.hidden, self.hidden)
-        ff_hidden = max(self.hidden, int(self.hidden * float(mlp_ratio)))
-        self.ffn = nn.Sequential(
-            nn.Linear(self.hidden, ff_hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_hidden, self.hidden),
-        )
-        self.norm1 = nn.LayerNorm(self.hidden)
+        ff_hidden = max(self.hidden, int(self.hidden * float(mlp_ratio) * 2 / 3))
+        self.ffn = SwiGLU(self.hidden, ff_hidden, self.hidden, dropout)
+        self.norm1 = RMSNorm(self.hidden)
         self.dropout = nn.Dropout(dropout)
 
     def _shape_heads(self, x: torch.Tensor) -> torch.Tensor:
@@ -164,7 +159,7 @@ class SDPAEncoder(nn.Module):
                 for _ in range(int(depth))
             ]
         )
-        self.norm = nn.LayerNorm(hidden)
+        self.norm = RMSNorm(hidden)
 
     def forward(
         self,
