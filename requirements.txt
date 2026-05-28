@@ -7,3 +7,4 @@ transformers>=4.44
 # Optional accelerators
 bitsandbytes>=0.43 ; platform_system == "Linux"
 flash-attn>=2.5 ; platform_system == "Linux"
+liger-kernel>=0.8.0 ; platform_system == "Linux"

@@ -26,9 +26,10 @@ class TrainingStepLogger:
         total_steps: Planned total count of optimizer steps.
     """
 
-    def __init__(self, architecture: str, total_steps: int) -> None:
+    def __init__(self, architecture: str, total_steps: int, initial_step: int = 0) -> None:
         self._architecture = architecture
         self._total_steps = max(1, int(total_steps))
+        self._initial_step = max(0, int(initial_step))
         self._time_origin = time.perf_counter()
 
     def build_line(
@@ -36,28 +37,38 @@ class TrainingStepLogger:
         *,
         step: int,
         loss: float,
+        loss_dict: dict[str, float] | None = None,
         timing: StepTiming,
     ) -> str:
         """Build a unified console line for a training step.
 
         Args:
             step: Current optimizer step (1-indexed).
-            loss: Step loss value.
+            loss: Step total loss value.
+            loss_dict: Dictionary of individual loss components.
             timing: Timing stats for this step.
 
         Returns:
             A fully formatted log line.
         """
         safe_loss = float(loss)
-        perplexity = math.exp(min(20.0, safe_loss))
+        
+        if loss_dict and "recon" in loss_dict:
+            perplexity = math.exp(min(20.0, float(loss_dict["recon"])))
+            components = " ".join(f"{k}={v:.3f}" for k, v in loss_dict.items())
+        else:
+            perplexity = math.exp(min(20.0, safe_loss))
+            components = ""
+
         elapsed = max(1e-9, time.perf_counter() - self._time_origin)
         eta_minutes = self._estimate_eta_minutes(step=step, elapsed=elapsed)
         stage_stats = " ".join(f"{name}={value:.3f}s" for name, value in timing.stages.items())
 
         return (
             f"[{self._architecture}] step={step}/{self._total_steps} "
-            f"loss={safe_loss:.6f} "
-            f"perplexity={perplexity:.4f} "
+            f"total_loss={safe_loss:.4f} "
+            f"perplexity={perplexity:.2f} "
+            f"({components}) "
             f"time={timing.total:.3f}s"
             f" {stage_stats} "
             f"eta={eta_minutes:.2f}m"
@@ -74,6 +85,7 @@ class TrainingStepLogger:
             Estimated remaining minutes.
         """
         safe_step = max(1, min(int(step), self._total_steps))
-        average_step_seconds = elapsed / float(safe_step)
+        steps_taken = max(1, safe_step - self._initial_step)
+        average_step_seconds = elapsed / float(steps_taken)
         remaining_steps = max(0, self._total_steps - safe_step)
         return (remaining_steps * average_step_seconds) / 60.0

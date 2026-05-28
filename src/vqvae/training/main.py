@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import torch
+import bitsandbytes as bnb
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from torch.utils.data import DataLoader
@@ -109,20 +110,23 @@ def run_training(
     pin_memory: bool = True,
     use_torch_compile: bool = False,
     compile_mode: str = "default",
-    use_triton_ema: bool = False,
     use_turboquant_kv: bool = False,
     turboquant_key_bits: int = 4,
     turboquant_value_bits: int = 4,
     turboquant_qjl_residual_scale: float = 0.5,
     gradient_checkpointing: bool = False,
     use_rotary_embeddings: bool = True,
+    use_unpadding: bool = False,
     log_every_steps: int = 10,
     verbose: bool = False,
     weight_decay: float = 0.05,
     warmup_ratio: float = 0.05,
     min_lr_ratio: float = 0.1,
     scheduler_type: str = "cosine",
+    optimizer_type: str = "adamw",
     max_grad_norm: float = 1.0,
+    tensorboard_dir: str = "runs/vqvae",
+    resume_from: Path | None = None,
 ) -> Path:
     _configure_logging(verbose)
     if gradient_accumulation_steps <= 0:
@@ -156,13 +160,13 @@ def run_training(
         pad_token_id=pad_token_id,
         semantic_pad_token_id=semantic_pad_token_id,
         max_position_embeddings=max_position_embeddings,
-        use_triton_ema=use_triton_ema,
         use_turboquant_kv=use_turboquant_kv,
         turboquant_key_bits=turboquant_key_bits,
         turboquant_value_bits=turboquant_value_bits,
         turboquant_qjl_residual_scale=turboquant_qjl_residual_scale,
         gradient_checkpointing=gradient_checkpointing,
         use_rotary_embeddings=use_rotary_embeddings,
+        use_unpadding=use_unpadding,
     ).to(dev)
     amp_dtype = torch.bfloat16
     amp_enabled = dev.type == "cuda"
@@ -178,7 +182,20 @@ def run_training(
     from src.core.optimization import build_cosine_warmup_scheduler_lambda, configure_weight_decay
 
     optim_groups = configure_weight_decay(model, weight_decay=weight_decay)
-    optimizer = torch.optim.AdamW(optim_groups, lr=lr)
+    if optimizer_type == "adamw8bit":
+        optimizer = bnb.optim.AdamW8bit(optim_groups, lr=lr)
+    elif optimizer_type == "adafactor":
+        from transformers.optimization import Adafactor
+        optimizer = Adafactor(
+            optim_groups,
+            lr=lr,
+            weight_decay=weight_decay,
+            scale_parameter=False,
+            relative_step=False,
+        )
+    else:
+        is_cuda = dev.type == "cuda"
+        optimizer = torch.optim.AdamW(optim_groups, lr=lr, fused=is_cuda)
 
     if scheduler_type == "onecycle":
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -210,13 +227,33 @@ def run_training(
     )
 
     model.train()
-    step_logger = TrainingStepLogger("vqvae", steps)
     loss = None
     step = 0
     micro_step = 0
     stop_state: dict[str, bool] = {"requested": False}
     previous_handlers = _install_signal_handlers(stop_state)
     optimizer.zero_grad(set_to_none=True)
+
+    tb_writer = None
+    if tensorboard_dir:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_writer = SummaryWriter(log_dir=tensorboard_dir)
+
+    if resume_from is not None and resume_from.exists():
+        CONSOLE.print(f"[VQVAE] Resuming training from checkpoint: {resume_from}")
+        ckpt = torch.load(resume_from, map_location="cpu")
+        if "model" in ckpt:
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in ckpt["model"].items()}
+            base_model.load_state_dict(state_dict)
+        step = ckpt.get("steps", 0)
+        micro_step = step * gradient_accumulation_steps
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+
+    step_logger = TrainingStepLogger("vqvae", steps, initial_step=step)
+
     try:
         with Progress(
             SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=CONSOLE
@@ -241,7 +278,9 @@ def run_training(
                         dtype=amp_dtype,
                         enabled=amp_enabled,
                     ):
-                        _, loss = model(tokens, padding_mask=padding_mask)
+                        with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
+                            logits, loss, loss_dict = model(tokens, padding_mask=padding_mask)
+                    del logits
                     forward_time = time.perf_counter() - forward_start
                     scaled_loss = loss / gradient_accumulation_steps
                     backward_start = time.perf_counter()
@@ -262,6 +301,7 @@ def run_training(
                                 step_logger.build_line(
                                     step=step,
                                     loss=float(loss.detach().item()),
+                                    loss_dict={k: float(v.item()) for k, v in loss_dict.items()},
                                     timing=StepTiming(
                                         total=time.perf_counter() - step_start,
                                         stages={
@@ -273,6 +313,11 @@ def run_training(
                                     ),
                                 )
                             )
+                            if tb_writer is not None:
+                                tb_writer.add_scalar("train/loss", float(loss.detach().item()), step)
+                                for k, v in loss_dict.items():
+                                    tb_writer.add_scalar(f"train/{k}", float(v.item()), step)
+                                tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
                     if step >= steps:
                         break
 
@@ -292,6 +337,7 @@ def run_training(
                         step_logger.build_line(
                             step=step,
                             loss=float(loss.detach().item()),
+                            loss_dict={k: float(v.item()) for k, v in loss_dict.items()},
                             timing=StepTiming(
                                 total=time.perf_counter() - step_start,
                                 stages={
@@ -303,9 +349,16 @@ def run_training(
                             ),
                         )
                     )
+                    if tb_writer is not None:
+                        tb_writer.add_scalar("train/loss", float(loss.detach().item()), step)
+                        for k, v in loss_dict.items():
+                            tb_writer.add_scalar(f"train/{k}", float(v.item()), step)
+                        tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
         save_vqvae_checkpoint(
             {
                 "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
                 "steps": step,
                 "model_config": {
                     "vocab_size": int(base_model.vocab_size),
@@ -322,6 +375,7 @@ def run_training(
                     ),
                     "gradient_checkpointing": bool(base_model.gradient_checkpointing),
                     "use_rotary_embeddings": bool(base_model.use_rotary_embeddings),
+                    "use_unpadding": bool(base_model.use_unpadding),
                 },
                 "metadata": TokenCacheMetadata(
                     kind=metadata.kind,
@@ -336,6 +390,8 @@ def run_training(
             output_path,
         )
         CONSOLE.print(f"[VQVAE] checkpoint saved: {output_path}")
+        if tb_writer is not None:
+            tb_writer.close()
         return output_path
     finally:
         _restore_signal_handlers(previous_handlers)
@@ -373,15 +429,18 @@ def main() -> None:
             pin_memory=True,
             use_torch_compile=args.use_torch_compile,
             compile_mode="default",
-            use_triton_ema=args.use_triton_ema,
             use_turboquant_kv=args.use_turboquant_kv,
             turboquant_key_bits=args.turboquant_key_bits,
             turboquant_value_bits=args.turboquant_value_bits,
             turboquant_qjl_residual_scale=args.turboquant_qjl_residual_scale,
             gradient_checkpointing=args.gradient_checkpointing,
             use_rotary_embeddings=not args.disable_rotary_embeddings,
+            use_unpadding=args.use_unpadding,
             log_every_steps=args.log_every_steps,
             verbose=args.verbose,
+            optimizer_type=args.optimizer,
+            tensorboard_dir=args.tensorboard_dir,
+            resume_from=Path(args.resume_from) if args.resume_from else None,
         )
     try:
         run_training(
@@ -405,20 +464,23 @@ def main() -> None:
             pin_memory=cfg.pin_memory,
             use_torch_compile=cfg.use_torch_compile,
             compile_mode=cfg.compile_mode,
-            use_triton_ema=cfg.use_triton_ema,
             use_turboquant_kv=cfg.use_turboquant_kv,
             turboquant_key_bits=cfg.turboquant_key_bits,
             turboquant_value_bits=cfg.turboquant_value_bits,
             turboquant_qjl_residual_scale=cfg.turboquant_qjl_residual_scale,
             gradient_checkpointing=cfg.gradient_checkpointing,
             use_rotary_embeddings=cfg.use_rotary_embeddings,
+            use_unpadding=cfg.use_unpadding,
             log_every_steps=cfg.log_every_steps,
             verbose=cfg.verbose,
             weight_decay=cfg.weight_decay,
             warmup_ratio=cfg.warmup_ratio,
             min_lr_ratio=cfg.min_lr_ratio,
             scheduler_type=cfg.scheduler_type,
+            optimizer_type=cfg.optimizer_type,
             max_grad_norm=cfg.max_grad_norm,
+            tensorboard_dir=cfg.tensorboard_dir,
+            resume_from=cfg.resume_from,
         )
     except TrainingInterruptedError:
         CONSOLE.print("[yellow]Training interrupted gracefully.[/yellow]")

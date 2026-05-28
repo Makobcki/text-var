@@ -10,7 +10,7 @@
   "checkpoint_path": "checkpoints/var_mbpp.pt",
   "phase_steps": [30000, 30000, 30000],
   "level_weights": [1.0, 1.0, 1.0],
-  "token_cache_path": "./dataset_var_tokens",
+  "token_cache_path": "dataset",
   "synthetic_count": 100,
   "token_metadata": {
     "kind": "vq",

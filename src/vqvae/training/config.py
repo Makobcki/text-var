@@ -49,6 +49,7 @@ class VQVAETrainConfig:
     warmup_ratio: float = 0.05
     min_lr_ratio: float = 0.1
     scheduler_type: str = "cosine"
+    optimizer_type: str = "adamw"
     max_grad_norm: float = 1.0
     level_index: int = 2
     gradient_accumulation_steps: int = 1
@@ -60,13 +61,15 @@ class VQVAETrainConfig:
     log_every_steps: int = 10
     verbose: bool = False
     semantic_pad_token_id: int = 0
-    use_triton_ema: bool = False
     use_turboquant_kv: bool = False
     turboquant_key_bits: int = 4
     turboquant_value_bits: int = 4
     turboquant_qjl_residual_scale: float = 0.5
     gradient_checkpointing: bool = False
+    use_unpadding: bool = False
     use_rotary_embeddings: bool = True
+    tensorboard_dir: str = "runs/vqvae"
+    resume_from: Path | None = None
 
 
 def _require_str(data: dict[str, Any], key: str) -> str:
@@ -127,6 +130,7 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         warmup_ratio=float(data.get("warmup_ratio", 0.05)),
         min_lr_ratio=float(data.get("min_lr_ratio", 0.1)),
         scheduler_type=str(data.get("scheduler_type", "cosine")),
+        optimizer_type=str(data.get("optimizer", data.get("optimizer_type", "adamw"))),
         max_grad_norm=float(data.get("max_grad_norm", 1.0)),
         level_index=int(data.get("level_index", 2)),
         gradient_accumulation_steps=int(data.get("gradient_accumulation_steps", 1)),
@@ -138,11 +142,13 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         log_every_steps=int(data.get("log_every_steps", 10)),
         verbose=bool(data.get("verbose", False)),
         semantic_pad_token_id=int(data.get("semantic_pad_token_id", 0)),
-        use_triton_ema=bool(data.get("use_triton_ema", False)),
         use_turboquant_kv=bool(data.get("use_turboquant_kv", False)),
         turboquant_key_bits=int(data.get("turboquant_key_bits", 4)),
         turboquant_value_bits=int(data.get("turboquant_value_bits", 4)),
         turboquant_qjl_residual_scale=float(data.get("turboquant_qjl_residual_scale", 0.5)),
         gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
+        use_unpadding=bool(data.get("use_unpadding", False)),
         use_rotary_embeddings=bool(data.get("use_rotary_embeddings", True)),
+        tensorboard_dir=str(data.get("tensorboard_dir", "runs/vqvae")),
+        resume_from=Path(data["resume_from"]) if data.get("resume_from") else None,
     )

@@ -380,7 +380,7 @@ def run_training(cfg: TrainConfig) -> Path:
     apply_phase_freezing(model, current_phase)
 
     model.train()
-    step_logger = TrainingStepLogger("var", int(cfg.max_steps))
+    step_logger = TrainingStepLogger("var", int(cfg.max_steps), initial_step=step)
     print(f"[TRAIN] Инициализация пройдена успешно. Старт на {device}.")
     stateful_level0_context: torch.Tensor | None = None
 
