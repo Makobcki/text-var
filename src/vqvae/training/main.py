@@ -3,6 +3,8 @@ import signal
 import time
 from pathlib import Path
 
+from src.var.fp8 import refresh_fp8_weights
+
 import torch
 import bitsandbytes as bnb
 from rich.console import Console
@@ -82,6 +84,7 @@ def run_training(
     dataloader_prefetch_factor: int = 2,
     pin_memory: bool = True,
     use_torch_compile: bool = False,
+    use_fp8: bool = False,
     compile_mode: str = "default",
     use_turboquant_kv: bool = False,
     turboquant_key_bits: int = 4,
@@ -90,6 +93,18 @@ def run_training(
     gradient_checkpointing: bool = False,
     use_rotary_embeddings: bool = True,
     use_unpadding: bool = False,
+    word_dropout_prob: float = 0.1,
+    encoder_num_heads: int = 8,
+    encoder_depth: int = 4,
+    encoder_mlp_ratio: float = 4.0,
+    encoder_dropout: float = 0.1,
+    compression_rate: int = 4,
+    downsample_num_blocks: int = 2,
+    fsq_levels: tuple[int, ...] = (8, 8, 8, 8, 8, 8, 8, 8),
+    decoder_num_heads: int = 8,
+    decoder_depth: int = 4,
+    decoder_mlp_ratio: float = 4.0,
+    decoder_dropout: float = 0.1,
     log_every_steps: int = 10,
     verbose: bool = False,
     weight_decay: float = 0.05,
@@ -127,8 +142,10 @@ def run_training(
         )
         vocab_size = level_vocab_size
 
+    from src.vqvae.config import VQVAEConfig
+    
     dev = torch.device("cuda" if device == "cuda" and torch.cuda.is_available() else "cpu")
-    base_model = SemanticTextVQVAE(
+    model_config = VQVAEConfig(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
         num_semantic_tokens=num_semantic_tokens,
@@ -143,7 +160,21 @@ def run_training(
         gradient_checkpointing=gradient_checkpointing,
         use_rotary_embeddings=use_rotary_embeddings,
         use_unpadding=use_unpadding,
-    ).to(dev)
+        use_fp8=use_fp8,
+        word_dropout_prob=word_dropout_prob,
+        encoder_num_heads=encoder_num_heads,
+        encoder_depth=encoder_depth,
+        encoder_mlp_ratio=encoder_mlp_ratio,
+        encoder_dropout=encoder_dropout,
+        compression_rate=compression_rate,
+        downsample_num_blocks=downsample_num_blocks,
+        fsq_levels=list(fsq_levels),
+        decoder_num_heads=decoder_num_heads,
+        decoder_depth=decoder_depth,
+        decoder_mlp_ratio=decoder_mlp_ratio,
+        decoder_dropout=decoder_dropout,
+    )
+    base_model = SemanticTextVQVAE(model_config).to(dev)
     amp_dtype = torch.bfloat16
     amp_enabled = dev.type == "cuda"
 
@@ -224,7 +255,10 @@ def run_training(
 
     if resume_from is not None and resume_from.exists():
         CONSOLE.print(f"[VQVAE] Resuming training from checkpoint: {resume_from}")
-        ckpt = torch.load(resume_from, map_location="cpu")
+        try:
+            ckpt = torch.load(resume_from, map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt = torch.load(resume_from, map_location="cpu")
         if "model" in ckpt:
             state_dict = {k.replace("_orig_mod.", ""): v for k, v in ckpt["model"].items()}
             base_model.load_state_dict(state_dict)
@@ -243,7 +277,7 @@ def run_training(
         ) as progress:
             task_id = progress.add_task(f"Training VQ-VAE 0/{steps}", total=None)
             
-            completed_epochs = 0
+            completed_epochs = step // estimated_steps_per_epoch if epochs > 0 else 0
             while step < steps and (epochs == 0 or completed_epochs < epochs):
                 if ckpt_manager.stop_requested:
                     CONSOLE.print(f"[VQVAE] Graceful stop requested at step {step}. Saving checkpoint...")
@@ -286,6 +320,7 @@ def run_training(
                         optimizer.step()
                         scheduler.step()
                         optimizer_time = time.perf_counter() - optimizer_start
+                        refresh_fp8_weights(model)
                         optimizer.zero_grad(set_to_none=True)
                         step += 1
                         if epochs > 0:
@@ -322,21 +357,7 @@ def run_training(
                                 "optimizer": optimizer.state_dict(),
                                 "scheduler": scheduler.state_dict(),
                                 "steps": step,
-                                "model_config": {
-                                    "vocab_size": int(base_model.vocab_size),
-                                    "hidden_size": int(base_model.hidden_size),
-                                    "num_semantic_tokens": int(base_model.quantizer.codebook_size),
-                                    "semantic_sequence_length": int(base_model.semantic_sequence_length),
-                                    "pad_token_id": int(base_model.pad_token_id),
-                                    "semantic_pad_token_id": int(base_model.semantic_pad_token_id),
-                                    "use_turboquant_kv": bool(base_model.use_turboquant_kv),
-                                    "turboquant_key_bits": int(base_model.turboquant_key_bits),
-                                    "turboquant_value_bits": int(base_model.turboquant_value_bits),
-                                    "turboquant_qjl_residual_scale": float(base_model.turboquant_qjl_residual_scale),
-                                    "gradient_checkpointing": bool(base_model.gradient_checkpointing),
-                                    "use_rotary_embeddings": bool(base_model.use_rotary_embeddings),
-                                    "use_unpadding": bool(base_model.use_unpadding),
-                                },
+                                "model_config": base_model.config.to_dict(),
                                 "metadata": TokenCacheMetadata(
                                     kind=metadata.kind,
                                     level_vocab_sizes=(vocab_size,),
@@ -396,23 +417,7 @@ def run_training(
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "steps": step,
-            "model_config": {
-                "vocab_size": int(base_model.vocab_size),
-                "hidden_size": int(base_model.hidden_size),
-                "num_semantic_tokens": int(base_model.quantizer.codebook_size),
-                "semantic_sequence_length": int(base_model.semantic_sequence_length),
-                "pad_token_id": int(base_model.pad_token_id),
-                "semantic_pad_token_id": int(base_model.semantic_pad_token_id),
-                "use_turboquant_kv": bool(base_model.use_turboquant_kv),
-                "turboquant_key_bits": int(base_model.turboquant_key_bits),
-                "turboquant_value_bits": int(base_model.turboquant_value_bits),
-                "turboquant_qjl_residual_scale": float(
-                    base_model.turboquant_qjl_residual_scale
-                ),
-                "gradient_checkpointing": bool(base_model.gradient_checkpointing),
-                "use_rotary_embeddings": bool(base_model.use_rotary_embeddings),
-                "use_unpadding": bool(base_model.use_unpadding),
-            },
+            "model_config": base_model.config.to_dict(),
             "metadata": TokenCacheMetadata(
                 kind=metadata.kind,
                 level_vocab_sizes=(vocab_size,),
@@ -439,6 +444,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.config:
         cfg = load_vqvae_train_config(Path(args.config))
+        if args.resume_from:
+            import dataclasses
+            cfg = dataclasses.replace(cfg, resume_from=Path(args.resume_from))
     else:
         if not args.output or not args.token_cache_dir:
             parser.error(
@@ -475,6 +483,18 @@ def main() -> None:
             gradient_checkpointing=args.gradient_checkpointing,
             use_rotary_embeddings=not args.disable_rotary_embeddings,
             use_unpadding=args.use_unpadding,
+            word_dropout_prob=args.word_dropout_prob,
+            encoder_num_heads=args.encoder_num_heads,
+            encoder_depth=args.encoder_depth,
+            encoder_mlp_ratio=args.encoder_mlp_ratio,
+            encoder_dropout=args.encoder_dropout,
+            compression_rate=args.compression_rate,
+            downsample_num_blocks=args.downsample_num_blocks,
+            fsq_levels=tuple(args.fsq_levels),
+            decoder_num_heads=args.decoder_num_heads,
+            decoder_depth=args.decoder_depth,
+            decoder_mlp_ratio=args.decoder_mlp_ratio,
+            decoder_dropout=args.decoder_dropout,
             log_every_steps=args.log_every_steps,
             verbose=args.verbose,
             optimizer_type=args.optimizer,
@@ -505,6 +525,7 @@ def main() -> None:
             dataloader_prefetch_factor=cfg.dataloader_prefetch_factor,
             pin_memory=cfg.pin_memory,
             use_torch_compile=cfg.use_torch_compile,
+            use_fp8=cfg.use_fp8,
             compile_mode=cfg.compile_mode,
             use_turboquant_kv=cfg.use_turboquant_kv,
             turboquant_key_bits=cfg.turboquant_key_bits,
@@ -513,6 +534,18 @@ def main() -> None:
             gradient_checkpointing=cfg.gradient_checkpointing,
             use_rotary_embeddings=cfg.use_rotary_embeddings,
             use_unpadding=cfg.use_unpadding,
+            word_dropout_prob=cfg.word_dropout_prob,
+            encoder_num_heads=cfg.encoder_num_heads,
+            encoder_depth=cfg.encoder_depth,
+            encoder_mlp_ratio=cfg.encoder_mlp_ratio,
+            encoder_dropout=cfg.encoder_dropout,
+            compression_rate=cfg.compression_rate,
+            downsample_num_blocks=cfg.downsample_num_blocks,
+            fsq_levels=cfg.fsq_levels,
+            decoder_num_heads=cfg.decoder_num_heads,
+            decoder_depth=cfg.decoder_depth,
+            decoder_mlp_ratio=cfg.decoder_mlp_ratio,
+            decoder_dropout=cfg.decoder_dropout,
             log_every_steps=cfg.log_every_steps,
             verbose=cfg.verbose,
             weight_decay=cfg.weight_decay,

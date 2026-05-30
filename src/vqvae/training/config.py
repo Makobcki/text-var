@@ -60,6 +60,7 @@ class VQVAETrainConfig:
     dataloader_prefetch_factor: int = 2
     pin_memory: bool = True
     use_torch_compile: bool = False
+    use_fp8: bool = False
     compile_mode: str = "default"
     log_every_steps: int = 10
     verbose: bool = False
@@ -71,6 +72,18 @@ class VQVAETrainConfig:
     gradient_checkpointing: bool = False
     use_unpadding: bool = False
     use_rotary_embeddings: bool = True
+    word_dropout_prob: float = 0.1
+    encoder_num_heads: int = 8
+    encoder_depth: int = 4
+    encoder_mlp_ratio: float = 4.0
+    encoder_dropout: float = 0.1
+    compression_rate: int = 4
+    downsample_num_blocks: int = 2
+    fsq_levels: tuple[int, ...] = (8, 8, 8, 8, 8, 8, 8, 8)
+    decoder_num_heads: int = 8
+    decoder_depth: int = 4
+    decoder_mlp_ratio: float = 4.0
+    decoder_dropout: float = 0.1
     tensorboard_dir: str = "runs/vqvae"
     resume_from: Path | None = None
 
@@ -144,6 +157,7 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         dataloader_prefetch_factor=int(data.get("dataloader_prefetch_factor", 2)),
         pin_memory=bool(data.get("pin_memory", True)),
         use_torch_compile=bool(data.get("use_torch_compile", False)),
+        use_fp8=bool(data.get("use_fp8", False)),
         compile_mode=str(data.get("compile_mode", "default")),
         log_every_steps=int(data.get("log_every_steps", 10)),
         verbose=bool(data.get("verbose", False)),
@@ -155,6 +169,18 @@ def load_vqvae_train_config(path: Path) -> VQVAETrainConfig:
         gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
         use_unpadding=bool(data.get("use_unpadding", False)),
         use_rotary_embeddings=bool(data.get("use_rotary_embeddings", True)),
+        word_dropout_prob=float(data.get("word_dropout_prob", 0.1)),
+        encoder_num_heads=int(data.get("encoder_num_heads", 8)),
+        encoder_depth=int(data.get("encoder_depth", 4)),
+        encoder_mlp_ratio=float(data.get("encoder_mlp_ratio", 4.0)),
+        encoder_dropout=float(data.get("encoder_dropout", 0.1)),
+        compression_rate=int(data.get("compression_rate", 4)),
+        downsample_num_blocks=int(data.get("downsample_num_blocks", 2)),
+        fsq_levels=tuple(int(v) for v in data.get("fsq_levels", (8, 8, 8, 8, 8, 8, 8, 8))),
+        decoder_num_heads=int(data.get("decoder_num_heads", 8)),
+        decoder_depth=int(data.get("decoder_depth", 4)),
+        decoder_mlp_ratio=float(data.get("decoder_mlp_ratio", 4.0)),
+        decoder_dropout=float(data.get("decoder_dropout", 0.1)),
         tensorboard_dir=str(data.get("tensorboard_dir", "runs/vqvae")),
         resume_from=Path(data["resume_from"]) if data.get("resume_from") else None,
     )

@@ -153,7 +153,9 @@ def _load_model(checkpoint_path: Path, device: torch.device) -> SemanticTextVQVA
         clean_state_dict[clean_key] = value
     # -----------------------------------------------------------
 
-    model = SemanticTextVQVAE(**model_config)
+    from src.vqvae.config import VQVAEConfig
+    model_config_obj = VQVAEConfig.from_dict(model_config)
+    model = SemanticTextVQVAE(model_config_obj)
 
     # Используем очищенный словарь весов
     model.load_state_dict(clean_state_dict)

@@ -225,13 +225,15 @@ class TextVARPipeline:
                 raise ValueError(
                     f"VQ-VAE checkpoint model_config.{field_name} is required for loading."
                 )
-        model = SemanticTextVQVAE(
-            vocab_size=int(model_config["vocab_size"]),
-            hidden_size=int(model_config["hidden_size"]),
-            num_semantic_tokens=int(model_config["num_semantic_tokens"]),
-            semantic_sequence_length=int(model_config["semantic_sequence_length"]),
-            pad_token_id=int(model_config["pad_token_id"]),
+        from src.vqvae.config import VQVAEConfig
+        config = VQVAEConfig(
+            vocab_size=int(model_config.get("vocab_size", 0)),
+            hidden_size=int(model_config.get("hidden_size", 1024)),
+            num_semantic_tokens=int(model_config.get("num_semantic_tokens", 4096)),
+            semantic_sequence_length=int(model_config.get("semantic_sequence_length", 1)),
+            pad_token_id=int(model_config.get("pad_token_id", 0)),
         )
+        model = SemanticTextVQVAE(config)
         model.load_state_dict(state_dict, strict=False)
         for param in model.parameters():
             param.requires_grad = False
