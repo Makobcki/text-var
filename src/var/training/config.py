@@ -98,6 +98,9 @@ def load_train_config(path: Path) -> TrainConfig:
             model_cfg_payload["level_vocab_sizes"] = list(token_metadata.level_vocab_sizes)
         if "level_lengths" not in model_cfg_payload:
             model_cfg_payload["level_lengths"] = list(token_metadata.level_lengths)
+            
+    if "use_fp8" in data and "use_fp8" not in model_cfg_payload:
+        model_cfg_payload["use_fp8"] = data["use_fp8"]
 
     model_cfg = VARConfig.from_dict(model_cfg_payload)
 

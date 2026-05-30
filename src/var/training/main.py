@@ -3,6 +3,8 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
+
+from src.var.fp8 import refresh_fp8_weights
 import math
 import random
 import time
@@ -449,6 +451,7 @@ def run_training(cfg: TrainConfig) -> Path:
                         )
                     optimizer.step()
                     scheduler.step()
+                    refresh_fp8_weights(model)
 
             backward_time = time.perf_counter() - backward_start
             optimizer_time = 0.0

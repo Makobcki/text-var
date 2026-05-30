@@ -9,6 +9,7 @@ from torch.utils.checkpoint import checkpoint
 from src.var.training.config import VARConfig
 from src.var.turboquant_math import generate_orthogonal_matrix
 from src.var.turboquant_triton import TurboQuantTritonInputs, turboquant_attention
+from src.var.fp8 import get_linear_layer
 
 if TYPE_CHECKING:
     from src.var.generator import TurboQuantCodec
@@ -83,19 +84,92 @@ class RMSNorm(nn.Module):
         return self.weight * x
 
 class SwiGLU(nn.Module):
-    def __init__(self, in_features: int, hidden_features: int, out_features: int, dropout: float = 0.0):
+    def __init__(self, in_features: int, hidden_features: int, out_features: int, dropout: float = 0.0, use_fp8: bool = False):
         super().__init__()
-        self.w1 = nn.Linear(in_features, hidden_features, bias=False)
-        self.w2 = nn.Linear(in_features, hidden_features, bias=False)
-        self.w3 = nn.Linear(hidden_features, out_features, bias=False)
+        self.w1 = get_linear_layer(in_features, hidden_features, bias=False, use_fp8=use_fp8)
+        self.w2 = get_linear_layer(in_features, hidden_features, bias=False, use_fp8=use_fp8)
+        self.w3 = get_linear_layer(hidden_features, out_features, bias=False, use_fp8=use_fp8)
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
+try:
+    from megablocks.layers.arguments import Arguments as MoEArgs
+    from megablocks.layers.dmoe import dMoE
+    HAS_MEGABLOCKS = True
+except ImportError:
+    HAS_MEGABLOCKS = False
+
+class MegablocksMoEWrapper(nn.Module):
+    def __init__(self, hidden: int, ff_hidden: int, num_experts: int, top_k: int):
+        super().__init__()
+        args = MoEArgs(
+            hidden_size=hidden,
+            ffn_hidden_size=ff_hidden,
+            moe_num_experts=num_experts,
+            moe_top_k=top_k,
+            moe_capacity_factor=1.0,
+            moe_loss_weight=1.0,
+            moe_expert_model_parallelism=False,
+            device=torch.cuda.current_device() if torch.cuda.is_available() else torch.device("cpu"),
+            bf16=True, 
+            mlp_type='swiglu',
+            mlp_impl='grouped'
+        )
+        self.moe = dMoE(args)
+        
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_len, hidden = x.shape
+        x_flat = x.view(-1, hidden)
+        out_flat, _ = self.moe(x_flat)
+        out = out_flat.view(batch_size, seq_len, hidden)
+        # megablocks router typically stores l_aux
+        aux_loss = getattr(self.moe.router, "l_aux", torch.tensor(0.0, device=x.device, dtype=x.dtype))
+        return out, aux_loss
+
+class SparseMoE(nn.Module):
+    def __init__(self, hidden: int, ff_hidden: int, num_experts: int, top_k: int, dropout: float = 0.0, use_fp8: bool = False):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.router = get_linear_layer(hidden, num_experts, bias=False, use_fp8=False)
+        self.experts = nn.ModuleList([
+            SwiGLU(hidden, ff_hidden, hidden, dropout, use_fp8=use_fp8)
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_len, hidden = x.shape
+        x_flat = x.view(-1, hidden)
+        
+        router_logits = self.router(x_flat)
+        routing_weights = F.softmax(router_logits, dim=-1)
+        
+        routing_weights_topk, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        routing_weights_topk = routing_weights_topk / routing_weights_topk.sum(dim=-1, keepdim=True)
+        
+        final_output = torch.zeros_like(x_flat)
+        tokens_per_expert = torch.zeros(self.num_experts, device=x.device, dtype=x.dtype)
+        router_probs = routing_weights.mean(dim=0)
+        
+        for expert_idx in range(self.num_experts):
+            expert_mask = (selected_experts == expert_idx)
+            token_indices, k_indices = torch.where(expert_mask)
+            tokens_per_expert[expert_idx] = token_indices.numel() / (x_flat.shape[0] * self.top_k)
+            
+            if token_indices.numel() > 0:
+                expert_inputs = x_flat[token_indices]
+                expert_outputs = self.experts[expert_idx](expert_inputs)
+                weights = routing_weights_topk[token_indices, k_indices].unsqueeze(-1)
+                final_output[token_indices] += expert_outputs * weights
+                
+        aux_loss = self.num_experts * torch.sum(router_probs * tokens_per_expert)
+        return final_output.view(batch_size, seq_len, hidden), aux_loss
+
 
 class SDPADecoderLayer(nn.Module):
-    def __init__(self, hidden: int, num_heads: int, mlp_ratio: float, dropout: float = 0.1) -> None:
+    def __init__(self, hidden: int, num_heads: int, mlp_ratio: float, dropout: float = 0.1, use_fp8: bool = False, use_moe: bool = False, num_experts: int = 8, moe_top_k: int = 2) -> None:
         super().__init__()
         self.hidden = hidden
         self.num_heads = num_heads
@@ -103,16 +177,30 @@ class SDPADecoderLayer(nn.Module):
         if hidden % num_heads != 0:
             raise ValueError("hidden_size must be divisible by num_heads.")
 
-        self.self_qkv = nn.Linear(hidden, hidden * 3)
-        self.cross_q = nn.Linear(hidden, hidden)
-        self.cross_kv = nn.Linear(hidden, hidden * 2)
-        self.self_out = nn.Linear(hidden, hidden)
-        self.cross_out = nn.Linear(hidden, hidden)
+        self.self_qkv = get_linear_layer(hidden, hidden * 3, use_fp8=use_fp8)
+        self.cross_q = get_linear_layer(hidden, hidden, use_fp8=use_fp8)
+        self.cross_kv = get_linear_layer(hidden, hidden * 2, use_fp8=use_fp8)
+        self.self_out = get_linear_layer(hidden, hidden, use_fp8=use_fp8)
+        self.cross_out = get_linear_layer(hidden, hidden, use_fp8=use_fp8)
 
         ff_hidden = max(hidden, int(hidden * float(mlp_ratio) * 2 / 3))
-        self.ffn = SwiGLU(hidden, ff_hidden, hidden, dropout)
+        # Round up to multiple of 128 for FP8 compatibility and optimal CUDA tiling
+        if use_fp8:
+            ff_hidden = ((ff_hidden + 127) // 128) * 128
+            
+        self.use_moe = use_moe
+        if self.use_moe:
+            if HAS_MEGABLOCKS:
+                self.ffn = MegablocksMoEWrapper(hidden, ff_hidden, num_experts, moe_top_k)
+            else:
+                self.ffn = SparseMoE(hidden, ff_hidden, num_experts, moe_top_k, dropout, use_fp8=use_fp8)
+        else:
+            self.ffn = SwiGLU(hidden, ff_hidden, hidden, dropout, use_fp8=use_fp8)
 
-        self.norm1 = RMSNorm(hidden)
+        # Per-sublayer Pre-Norm (sequential residual connections)
+        self.norm_self_attn = RMSNorm(hidden)
+        self.norm_cross_attn = RMSNorm(hidden)
+        self.norm_ffn = RMSNorm(hidden)
         self.dropout = nn.Dropout(dropout)
         self.attention_dropout = float(dropout)
         self.register_buffer(
@@ -209,10 +297,11 @@ class SDPADecoderLayer(nn.Module):
         self_is_causal: bool = False,
         rotary_freqs_tgt: torch.Tensor | None = None,
         past_key_value: tuple[torch.Tensor, torch.Tensor] | RingKVCacheView | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         x = tgt
 
-        x1 = self.norm1(x)
+        # 1. Self-Attention с собственной нормализацией
+        x1 = self.norm_self_attn(x)
         qkv = self.self_qkv(x1)
         q, k, v = qkv.chunk(3, dim=-1)
         batch_size, seq_len, _ = x.shape
@@ -282,8 +371,11 @@ class SDPADecoderLayer(nn.Module):
                 is_causal=self_is_causal and self_attn_mask is None,
             )
         self_attn_out = self.dropout(self.self_out(self._merge_heads(self_attn)))
+        x = x + self_attn_out
 
-        cq = self.cross_q(x1)
+        # 2. Cross-Attention с собственной нормализацией
+        x2 = self.norm_cross_attn(x)
+        cq = self.cross_q(x2)
         if cross_kv_memory is None:
             ckv = self.cross_kv(memory)
             ck, cv = ckv.chunk(2, dim=-1)
@@ -299,10 +391,18 @@ class SDPADecoderLayer(nn.Module):
             is_causal=False,
         )
         cross_attn_out = self.dropout(self.cross_out(self._merge_heads(cross_attn)))
+        x = x + cross_attn_out
 
-        ffn_out = self.dropout(self.ffn(x1))
-        x = x + self_attn_out + cross_attn_out + ffn_out
-        return x, present_key_value
+        # 3. FFN с собственной нормализацией
+        x3 = self.norm_ffn(x)
+        aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        if self.use_moe:
+            ffn_out, aux_loss = self.ffn(x3)
+            ffn_out = self.dropout(ffn_out)
+        else:
+            ffn_out = self.dropout(self.ffn(x3))
+        x = x + ffn_out
+        return x, present_key_value, aux_loss
 
 
 class VARTransformer(nn.Module):
@@ -329,6 +429,10 @@ class VARTransformer(nn.Module):
                     num_heads=int(cfg.num_heads),
                     mlp_ratio=float(cfg.mlp_ratio),
                     dropout=float(cfg.dropout),
+                    use_fp8=bool(getattr(cfg, "use_fp8", False)),
+                    use_moe=bool(getattr(cfg, "use_moe", False)),
+                    num_experts=int(getattr(cfg, "num_experts", 8)),
+                    moe_top_k=int(getattr(cfg, "moe_top_k", 2)),
                 )
                 for _ in range(int(cfg.depth))
             ]
@@ -336,14 +440,14 @@ class VARTransformer(nn.Module):
         self.norm = RMSNorm(hidden)
 
         self.heads = nn.ModuleList(
-            [nn.Linear(hidden, vocab_size) for vocab_size in cfg.level_vocab_sizes]
+            [get_linear_layer(hidden, vocab_size, use_fp8=bool(getattr(cfg, "use_fp8", False))) for vocab_size in cfg.level_vocab_sizes]
         )
 
         self.early_exit_heads = nn.ModuleDict()
         for layer_idx in cfg.exit_layers:
             for scale_idx, vocab_size in enumerate(cfg.level_vocab_sizes):
                 head_key = f"layer_{layer_idx}_scale_{scale_idx}"
-                self.early_exit_heads[head_key] = nn.Linear(hidden, vocab_size)
+                self.early_exit_heads[head_key] = get_linear_layer(hidden, vocab_size, use_fp8=bool(getattr(cfg, "use_fp8", False)))
 
     def _validate_token_ids(self, token_ids: torch.Tensor, *, level_idx: int, source: str) -> None:
         """Validate that token ids are in-range for the given hierarchical level.
@@ -418,9 +522,9 @@ class VARTransformer(nn.Module):
             rotary_freqs_tgt: Rotary frequencies for prefix sequence.
 
         Returns:
-            Updated prefix features.
+            Tuple of (Updated prefix features, aux_loss).
         """
-        out, _ = block(
+        out, _, l_aux = block(
             tgt=x_scale,
             memory=current_context,
             self_attn_mask=None,
@@ -428,7 +532,7 @@ class VARTransformer(nn.Module):
             rotary_freqs_tgt=rotary_freqs_tgt,
             past_key_value=None,
         )
-        return out
+        return out, l_aux
 
     def _encode_prefix_memories(
         self,
@@ -436,7 +540,7 @@ class VARTransformer(nn.Module):
         *,
         batch_size: int,
         compact_memory_for_final_level: bool,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
         """Encode all prefix levels once and build per-target memories.
 
         Args:
@@ -445,13 +549,14 @@ class VARTransformer(nn.Module):
             compact_memory_for_final_level: Whether to compress memory to the prior level length.
 
         Returns:
-            Tuple of null memory tensor and per-target final memories.
+            Tuple of null memory tensor, per-target final memories, and accumulated aux_loss.
         """
         b = prefix_inputs[0].shape[0] if prefix_inputs else batch_size
         null_mem = self.null_token_embedding.weight.unsqueeze(0).expand(b, 1, -1)
         current_context = null_mem
         last_scale_memory = null_mem
         memories_by_target: list[torch.Tensor] = [null_mem]
+        prefix_aux_loss = torch.tensor(0.0, device=null_mem.device, dtype=null_mem.dtype)
 
         for s_idx, scale_input in enumerate(prefix_inputs):
             self._validate_token_ids(scale_input, level_idx=s_idx, source=f"prefix_inputs[{s_idx}]")
@@ -467,14 +572,14 @@ class VARTransformer(nn.Module):
             local_radius = int(getattr(self.cfg, "local_attention_radius", 0))
             for block in self.blocks:
                 if local_radius > 0 and seq_len > 1:
-                    x_scale = self._run_prefix_block_causal(
+                    x_scale, l_aux = self._run_prefix_block_causal(
                         block=block,
                         x_scale=x_scale,
                         current_context=current_context,
                         rotary_freqs_tgt=rotary_freqs_tgt,
                     )
                 elif use_ckpt:
-                    x_scale, _ = checkpoint(
+                    x_scale, _, l_aux = checkpoint(
                         block,
                         use_reentrant=False,
                         tgt=x_scale,
@@ -485,7 +590,7 @@ class VARTransformer(nn.Module):
                         past_key_value=None,
                     )
                 else:
-                    x_scale, _ = block(
+                    x_scale, _, l_aux = block(
                         tgt=x_scale,
                         memory=current_context,
                         self_attn_mask=None,
@@ -493,6 +598,7 @@ class VARTransformer(nn.Module):
                         rotary_freqs_tgt=rotary_freqs_tgt,
                         past_key_value=None,
                     )
+                prefix_aux_loss = prefix_aux_loss + l_aux
 
             encoded = self.norm(x_scale)
             compress_tokens = (
@@ -508,7 +614,7 @@ class VARTransformer(nn.Module):
             memories_by_target.append(
                 self._maybe_turboquant_memory(torch.cat([null_mem, last_scale_memory], dim=1))
             )
-        return null_mem, memories_by_target
+        return null_mem, memories_by_target, prefix_aux_loss
 
     def forward(
         self,
@@ -527,6 +633,8 @@ class VARTransformer(nn.Module):
         torch.Tensor
         | tuple[torch.Tensor, list[torch.Tensor]]
         | tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]
+        | tuple[torch.Tensor, torch.Tensor]
+        | tuple[tuple[torch.Tensor, list[torch.Tensor]], torch.Tensor]
     ):
         if cfg_scale != 1.0 and prefix_inputs:
             out_cond = self.forward(
@@ -549,12 +657,14 @@ class VARTransformer(nn.Module):
                 compact_memory_for_final_level=compact_memory_for_final_level,
             )
             if return_early_outputs:
-                logits_cond, early_cond = out_cond
-                logits_uncond, early_uncond = out_uncond
+                (logits_cond, early_cond), aux_loss_cond = out_cond
+                (logits_uncond, early_uncond), aux_loss_uncond = out_uncond
                 final_logits = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
                 final_early = [u + cfg_scale * (c - u) for c, u in zip(early_cond, early_uncond, strict=True)]  # noqa: E501
-                return final_logits, final_early
-            return out_uncond + cfg_scale * (out_cond - out_uncond)
+                return (final_logits, final_early), aux_loss_cond + aux_loss_uncond
+            out_cond_tensor, aux_loss_cond = out_cond
+            out_uncond_tensor, aux_loss_uncond = out_uncond
+            return out_uncond_tensor + cfg_scale * (out_cond_tensor - out_uncond_tensor), aux_loss_cond + aux_loss_uncond
 
         if prefix_inputs:
             b = prefix_inputs[0].shape[0]
@@ -564,13 +674,15 @@ class VARTransformer(nn.Module):
             b = batch_size if batch_size else 1
 
         target_idx = target_level if target_level is not None else len(prefix_inputs)
+        total_aux_loss = torch.tensor(0.0, device=x.device if 'x' in locals() else prefix_inputs[0].device if prefix_inputs else self.target_token.device, dtype=self.target_token.dtype)
         if precomputed_final_memory is None:
-            _, memories_by_target = self._encode_prefix_memories(
+            _, memories_by_target, prefix_aux = self._encode_prefix_memories(
                 prefix_inputs[:target_idx],
                 batch_size=b,
                 compact_memory_for_final_level=compact_memory_for_final_level,
             )
             final_memory = memories_by_target[target_idx]
+            total_aux_loss = total_aux_loss + prefix_aux
         else:
             final_memory = precomputed_final_memory
         projected_final_memory = [
@@ -614,7 +726,7 @@ class VARTransformer(nn.Module):
             if past_key_values is not None and layer_idx < len(past_key_values):
                 layer_past = past_key_values[layer_idx]
             if use_ckpt:
-                x, present = checkpoint(
+                x, present, l_aux = checkpoint(
                     block,
                     use_reentrant=False,
                     tgt=x,
@@ -626,7 +738,7 @@ class VARTransformer(nn.Module):
                     cross_kv_memory=projected_final_memory[layer_idx],
                 )
             else:
-                x, present = block(
+                x, present, l_aux = block(
                     tgt=x,
                     memory=final_memory,
                     self_attn_mask=self_mask,
@@ -635,6 +747,7 @@ class VARTransformer(nn.Module):
                     past_key_value=layer_past,
                     cross_kv_memory=projected_final_memory[layer_idx],
                 )
+            total_aux_loss = total_aux_loss + l_aux
             if use_cache:
                 present_key_values.append(present)
             if return_early_outputs and layer_idx in self.cfg.exit_layers:
@@ -647,5 +760,5 @@ class VARTransformer(nn.Module):
         if use_cache:
             return out_features, present_key_values
         if return_early_outputs:
-            return out_features, early_outputs
-        return out_features
+            return (out_features, early_outputs), total_aux_loss
+        return out_features, total_aux_loss

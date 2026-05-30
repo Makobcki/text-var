@@ -105,6 +105,7 @@ def multiscale_next_scale_cross_entropy(
 
     total_loss_sum: torch.Tensor | None = None
     total_normalizer: torch.Tensor | None = None
+    total_moe_loss: torch.Tensor | None = None
     batch_size = moved_tokens[0].size(0)
     use_flash = bool(getattr(model.cfg, "flash_cross_entropy", True))
     ignore_index = getattr(model.cfg, "pad_token_id", None)
@@ -155,7 +156,7 @@ def multiscale_next_scale_cross_entropy(
                 model_input[mask_positions] = int(model.cfg.mask_token_id)
 
         if use_early_exit_loss:
-            final_pred, early_outputs = model(
+            (final_pred, early_outputs), aux_loss = model(
                 prefix_inputs,
                 target_level=target_idx,
                 current_level_input=model_input,
@@ -167,7 +168,7 @@ def multiscale_next_scale_cross_entropy(
             )
             all_predictions = early_outputs + [final_pred]
         else:
-            final_pred = model(
+            final_pred, aux_loss = model(
                 prefix_inputs,
                 target_level=target_idx,
                 current_level_input=model_input,
@@ -178,6 +179,8 @@ def multiscale_next_scale_cross_entropy(
                 ),
             )
             all_predictions = [final_pred]
+            
+        total_moe_loss = aux_loss if total_moe_loss is None else total_moe_loss + aux_loss
 
         level_weight = (
             level_weights[target_idx] if level_weights and target_idx < len(level_weights) else 1.0
@@ -224,4 +227,8 @@ def multiscale_next_scale_cross_entropy(
     if total_loss_sum is None or total_normalizer is None:
         reference = moved_tokens[0]
         return torch.zeros((), device=reference.device, dtype=torch.float32)
-    return total_loss_sum / total_normalizer.clamp_min(1.0)
+        
+    moe_coef = float(getattr(model.cfg, "router_aux_loss_coef", 0.01))
+    moe_term = total_moe_loss * moe_coef if total_moe_loss is not None else 0.0
+    
+    return (total_loss_sum / total_normalizer.clamp_min(1.0)) + moe_term

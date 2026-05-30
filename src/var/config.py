@@ -23,6 +23,12 @@ class VARConfig:
     eos_token_id: int = 2
     gradient_checkpointing: bool = False
     local_attention_radius: int = 0
+    use_fp8: bool = False
+    
+    use_moe: bool = False
+    num_experts: int = 8
+    moe_top_k: int = 2
+    router_aux_loss_coef: float = 0.01
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VARConfig":
@@ -42,6 +48,11 @@ class VARConfig:
             eos_token_id=int(data.get("eos_token_id", 2)),
             gradient_checkpointing=bool(data.get("gradient_checkpointing", False)),
             local_attention_radius=int(data.get("local_attention_radius", 0)),
+            use_fp8=bool(data.get("use_fp8", False)),
+            use_moe=bool(data.get("use_moe", False)),
+            num_experts=int(data.get("num_experts", 8)),
+            moe_top_k=int(data.get("moe_top_k", 2)),
+            router_aux_loss_coef=float(data.get("router_aux_loss_coef", 0.01)),
         )
 
     def to_dict(self) -> dict[str, Any]:
