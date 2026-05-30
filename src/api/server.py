@@ -39,11 +39,13 @@ class ContinuousBatchingProcessor:
     def __init__(self, max_batch_size: int = 16, collect_window_ms: int = 8) -> None:
         self._max_batch_size = max_batch_size
         self._collect_window_seconds = collect_window_ms / 1000
-        self._queue: asyncio.Queue[_BatchTask] = asyncio.Queue()
+        self._queue: asyncio.Queue[_BatchTask] | None = None
         self._worker_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the background batch worker."""
+        if self._queue is None:
+            self._queue = asyncio.Queue()
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(self._run_worker())
 
@@ -57,15 +59,20 @@ class ContinuousBatchingProcessor:
         except asyncio.CancelledError:
             LOGGER.debug("Continuous batching worker cancelled.")
         self._worker_task = None
+        self._queue = None
 
     async def generate(self, params: GenerationParams) -> str:
         """Queue generation request and wait for result."""
+        if self._queue is None:
+            raise RuntimeError("Batch processor is not running.")
         task = _BatchTask(params)
         await self._queue.put(task)
         return await task.future
 
     async def _run_worker(self) -> None:
         """Process queued requests with dynamic batch formation."""
+        if self._queue is None:
+            return
         while True:
             first_task = await self._queue.get()
             pending: list[_BatchTask] = [first_task]
