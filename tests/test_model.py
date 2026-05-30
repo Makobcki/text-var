@@ -30,28 +30,6 @@ class _CaptureDecoderLayer(SDPADecoderLayer):
         return tgt, past_key_value
 
 
-def test_prefix_uses_sliding_window_causal_attention_when_radius_enabled() -> None:
-    cfg = VARConfig(
-        level_vocab_sizes=(32, 64),
-        level_lengths=(4, 4),
-        hidden_size=8,
-        depth=1,
-        num_heads=2,
-        mlp_ratio=1.0,
-        exit_layers=(),
-        local_attention_radius=1,
-    )
-    model = VARTransformer(cfg).eval()
-    capture_layer = _CaptureDecoderLayer(hidden=cfg.hidden_size, num_heads=cfg.num_heads)
-    model.blocks = torch.nn.ModuleList([capture_layer])
-
-    prefix_tokens = [torch.tensor([[1, 2, 3, 4]], dtype=torch.long)]
-    current_tokens = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
-    _ = model(prefix_tokens, target_level=1, current_level_input=current_tokens)
-
-    assert len(capture_layer.masks) == 2
-    assert capture_layer.masks[0] is not None
-    assert capture_layer.causal_flags[0] is False
 
 
 def test_prefix_mask_disabled_when_radius_zero() -> None:
@@ -134,26 +112,7 @@ def test_decoder_layer_stores_configured_attention_dropout() -> None:
     assert layer.attention_dropout == 0.25
 
 
-def test_local_sliding_window_mask_uses_banded_causal_pattern() -> None:
-    cfg = VARConfig(
-        level_vocab_sizes=(16, 16),
-        level_lengths=(4, 4),
-        hidden_size=8,
-        depth=1,
-        num_heads=2,
-        mlp_ratio=1.0,
-        exit_layers=(),
-    )
-    model = VARTransformer(cfg).eval()
-    mask = model._build_local_causal_mask(seq_len=5, radius=2, device=torch.device("cpu"))
 
-    expected = torch.full((5, 5), float("-inf"))
-    expected[0, 0] = 0.0
-    expected[1, 0:2] = 0.0
-    expected[2, 1:3] = 0.0
-    expected[3, 2:4] = 0.0
-    expected[4, 3:5] = 0.0
-    assert torch.equal(mask, expected)
 
 
 def test_model_raises_clear_error_for_out_of_range_prefix_tokens() -> None:

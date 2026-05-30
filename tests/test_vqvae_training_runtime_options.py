@@ -11,9 +11,7 @@ def test_cli_parses_runtime_optimization_flags() -> None:
         "--token-cache-dir", "cache",
         "--dataloader-num-workers", "6",
         "--dataloader-prefetch-factor", "3",
-        "--amp-dtype", "fp16",
         "--use-torch-compile",
-        "--use-triton-ema",
         "--use-turboquant-kv",
         "--turboquant-key-bits", "3",
         "--turboquant-value-bits", "5",
@@ -25,9 +23,7 @@ def test_cli_parses_runtime_optimization_flags() -> None:
 
     assert args.dataloader_num_workers == 6
     assert args.dataloader_prefetch_factor == 3
-    assert args.amp_dtype == "fp16"
     assert args.use_torch_compile is True
-    assert args.use_triton_ema is True
     assert args.use_turboquant_kv is True
     assert args.turboquant_key_bits == 3
     assert args.turboquant_value_bits == 5
@@ -53,11 +49,9 @@ def test_config_loads_runtime_optimization_options(tmp_path: Path) -> None:
   "token_cache_dir": "cache-dir",
   "dataloader_num_workers": 2,
   "dataloader_prefetch_factor": 4,
-  "amp_dtype": "none",
   "use_torch_compile": true,
   "log_every_steps": 7
   ,"semantic_pad_token_id": 7
-  ,"use_triton_ema": true
   ,"use_turboquant_kv": true
   ,"turboquant_key_bits": 3
   ,"turboquant_value_bits": 5
@@ -73,11 +67,9 @@ def test_config_loads_runtime_optimization_options(tmp_path: Path) -> None:
 
     assert cfg.dataloader_num_workers == 2
     assert cfg.dataloader_prefetch_factor == 4
-    assert cfg.amp_dtype == "none"
     assert cfg.use_torch_compile is True
     assert cfg.log_every_steps == 7
     assert cfg.semantic_pad_token_id == 7
-    assert cfg.use_triton_ema is True
     assert cfg.use_turboquant_kv is True
     assert cfg.turboquant_key_bits == 3
     assert cfg.turboquant_value_bits == 5

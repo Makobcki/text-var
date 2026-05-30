@@ -35,13 +35,15 @@ def test_decoder_cache_is_built_for_incremental_step() -> None:
     ).eval()
     memory = torch.randn(1, 2, 32)
     first_tokens = torch.tensor([[1, 2]], dtype=torch.long)
-    first_pos = model._position_ids(first_tokens.size(1), first_tokens.device)
-    first_emb = model.embedding(first_tokens) + model.pos_embedding(first_pos)
-    _, cache = model._run_decoder(tgt_emb=first_emb, memory=memory, incremental=False)
+    first_emb = model.embedding(first_tokens)
+    first_hidden, cache = model._run_decoder(
+        tgt_emb=first_emb,
+        memory=memory,
+        incremental=False,
+    )
 
     next_tokens = torch.tensor([[3]], dtype=torch.long)
-    next_pos = model._position_ids(3, next_tokens.device)[:, -1:]
-    next_emb = model.embedding(next_tokens) + model.pos_embedding(next_pos)
+    next_emb = model.embedding(next_tokens)
     decoded_step, updated_cache = model._run_decoder(
         tgt_emb=next_emb,
         memory=memory,
@@ -148,7 +150,7 @@ def test_decode_passes_turboquant_config_to_ring_buffer(monkeypatch) -> None:
         semantic_sequence_length=2,
         max_position_embeddings=16,
         use_turboquant_kv=True,
-        turboquant_key_bits=3,
+        turboquant_key_bits=4,
         turboquant_value_bits=4,
         turboquant_qjl_residual_scale=0.25,
     ).eval()
@@ -165,6 +167,14 @@ def test_decode_passes_turboquant_config_to_ring_buffer(monkeypatch) -> None:
         "__init__",
         _capture_init,
     )
+    monkeypatch.setattr(
+        model,
+        "_run_decoder",
+        lambda *args, **kwargs: (
+            torch.zeros((1, 1, 32), dtype=torch.float32),
+            [ (torch.zeros((1, 1, 1, 32)), torch.zeros((1, 1, 1, 32))) for _ in range(len(model.decoder_layers)) ]
+        )
+    )
     _ = model.decode_from_semantic_indices(
         torch.tensor([[1, 2]], dtype=torch.long),
         max_length=4,
@@ -176,7 +186,7 @@ def test_decode_passes_turboquant_config_to_ring_buffer(monkeypatch) -> None:
     turbo_cfg = observed["turbo_cfg"]
     assert observed["max_window"] == 4
     assert turbo_cfg is not None
-    assert turbo_cfg.key_bits == 3
+    assert turbo_cfg.key_bits == 4
     assert turbo_cfg.value_bits == 4
     assert turbo_cfg.qjl_residual_scale == 0.25
 

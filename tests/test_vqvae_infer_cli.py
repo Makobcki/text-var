@@ -2,11 +2,16 @@ from pathlib import Path
 
 import torch
 from src.vqvae.infer_cli import InferConfig, _load_tokenizer, build_parser, run_roundtrip
+from transformers import PreTrainedTokenizerFast
 
 
 class _FakeTokenizer:
     bos_token_id = 1
     eos_token_id = 2
+    pad_token_id = 0
+
+    def __init__(self, **kwargs):
+        pass
 
     def __call__(self, *_args, **_kwargs):
         return {
@@ -41,6 +46,10 @@ def test_load_tokenizer_supports_pretrained_name(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.vqvae.infer_cli.AutoTokenizer.from_pretrained",
         lambda _name, use_fast: _FakeTokenizer(),
+    )
+    monkeypatch.setattr(
+        "src.vqvae.infer_cli.PreTrainedTokenizerFast",
+        _FakeTokenizer,
     )
     tokenizer = _load_tokenizer("gpt2")
     assert isinstance(tokenizer, _FakeTokenizer)

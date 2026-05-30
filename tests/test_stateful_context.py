@@ -13,7 +13,16 @@ class _DummyModel:
         self.cfg = _DummyCfg()
         self.recorded_prefix_lengths = []
 
-    def __call__(self, prefix_inputs, *, target_level, current_level_input, batch_size, return_early_outputs):  # noqa: E501
+    def __call__(
+        self,
+        prefix_inputs,
+        target_level,
+        current_level_input,
+        batch_size=None,
+        return_early_outputs=False,
+        precomputed_final_memory=None,
+    ):
+        del target_level, batch_size, return_early_outputs, precomputed_final_memory
         if prefix_inputs:
             self.recorded_prefix_lengths.append(prefix_inputs[0].shape[1])
         vocab = 16

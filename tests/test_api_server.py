@@ -17,9 +17,9 @@ class DummyEngine:
 def test_completions_handles_prompt_batch() -> None:
     """Ensure /v1/completions returns one choice per prompt in batch order."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post(
+        response = client.post(
         "/v1/completions",
         json={"prompt": ["first", "second"], "max_tokens": 3},
     )
@@ -34,9 +34,9 @@ def test_completions_handles_prompt_batch() -> None:
 def test_completions_passes_sampling_params() -> None:
     """Ensure completion endpoint forwards temperature and top_p to engine."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post(
+        response = client.post(
         "/v1/completions",
         json={"prompt": "first", "max_tokens": 2, "temperature": 0.3, "top_p": 0.8},
     )
@@ -48,9 +48,9 @@ def test_completions_passes_sampling_params() -> None:
 def test_completions_rejects_empty_prompt_batch() -> None:
     """Ensure /v1/completions returns 400 for empty prompt list."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post("/v1/completions", json={"prompt": []})
+        response = client.post("/v1/completions", json={"prompt": []})
 
     assert response.status_code == 400
     assert "Prompt list cannot be empty" in response.json()["detail"]
@@ -61,9 +61,9 @@ def test_completions_rejects_empty_prompt_batch() -> None:
 def test_completions_rejects_blank_prompts() -> None:
     """Ensure /v1/completions returns 400 for blank prompt values."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post("/v1/completions", json={"prompt": "   "})
+        response = client.post("/v1/completions", json={"prompt": "   "})
 
     assert response.status_code == 400
     assert "Prompt must contain non-whitespace characters" in response.json()["detail"]
@@ -82,9 +82,9 @@ def test_completions_forwards_turboquant_flag() -> None:
 
     engine = CapturingEngine()
     server._engine = engine
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post(
+        response = client.post(
         "/v1/completions",
         json={"prompt": "hello", "max_tokens": 2, "turboquant_kv": True},
     )
@@ -95,9 +95,9 @@ def test_completions_forwards_turboquant_flag() -> None:
 def test_chat_completions_uses_chat_template_markers() -> None:
     """Ensure chat endpoint builds prompt with message boundary markers."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post(
+        response = client.post(
         "/v1/chat/completions",
         json={
             "messages": [
@@ -119,9 +119,9 @@ def test_chat_completions_uses_chat_template_markers() -> None:
 def test_completions_returns_nonzero_usage_counts() -> None:
     """Ensure /v1/completions usage contains derived token counts."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post(
+        response = client.post(
         "/v1/completions",
         json={"prompt": "alpha beta", "max_tokens": 2},
     )
@@ -136,9 +136,9 @@ def test_completions_returns_nonzero_usage_counts() -> None:
 def test_chat_completions_returns_nonzero_usage_counts() -> None:
     """Ensure /v1/chat/completions usage contains derived token counts."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post(
+        response = client.post(
         "/v1/chat/completions",
         json={"messages": [{"role": "user", "content": "hello world"}]},
     )
@@ -152,9 +152,9 @@ def test_chat_completions_returns_nonzero_usage_counts() -> None:
 def test_chat_completions_rejects_stream_mode_until_true_streaming_exists() -> None:
     """Ensure stream mode fails explicitly instead of emulating SSE with one full chunk."""
     server._engine = DummyEngine()
-    client = TestClient(server.app)
+    with TestClient(server.app) as client:
 
-    response = client.post(
+        response = client.post(
         "/v1/chat/completions",
         json={"messages": [{"role": "user", "content": "hello"}], "stream": True},
     )

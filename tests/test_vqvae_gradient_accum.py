@@ -5,13 +5,16 @@ import torch
 from src.vqvae.training import main as training_main
 
 
-class DummyModel:
-    def __init__(self) -> None:
+class DummyModel(torch.nn.Module):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__()
         self.vocab_size = 8
         self.hidden_size = 4
         self.semantic_sequence_length = 2
         self.pad_token_id = 0
         self.quantizer = type("Quantizer", (), {"num_embeddings": 16})()
+        self.dummy_param = torch.nn.Parameter(torch.zeros(1))
+        self.config = type("Config", (), {"to_dict": lambda self: {}})()
 
     def to(self, _dev: torch.device) -> "DummyModel":
         return self
@@ -27,13 +30,15 @@ class DummyModel:
 
     def __call__(self, _tokens: torch.Tensor, padding_mask: torch.Tensor):
         loss = (padding_mask.float().sum() * 0.0) + torch.tensor(1.0, requires_grad=True)
-        return torch.zeros_like(_tokens), loss
+        return torch.zeros_like(_tokens), loss, {"loss": loss}
 
 
-class DummyOptimizer:
-    def __init__(self, _params, _lr: float) -> None:
+class DummyOptimizer(torch.optim.Optimizer):
+    def __init__(self, params, lr) -> None:
         self.step_calls = 0
         self.zero_calls = 0
+        defaults = {"lr": lr}
+        super().__init__(params, defaults)
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         _ = set_to_none
@@ -64,19 +69,18 @@ def test_run_training_uses_gradient_accumulation(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(
         training_main,
         "load_token_entries_from_directory",
-        lambda _path: ([Path("chunk.pt")], metadata),
+        lambda *_: ([Path("chunk.pt")], metadata),
     )
     monkeypatch.setattr(training_main, "MultiscaleTokenChunkIterableDataset", lambda **_: object())
     monkeypatch.setattr(training_main, "DataLoader", lambda *_, **__: batches)
-    monkeypatch.setattr(training_main, "SemanticTextVQVAE", lambda **_: DummyModel())
+    monkeypatch.setattr(training_main, "SemanticTextVQVAE", lambda *_, **__: DummyModel())
 
-    def _make_optimizer(params, lr: float) -> DummyOptimizer:
+    def _make_optimizer(params, lr: float, **kwargs) -> DummyOptimizer:
         optimizer = DummyOptimizer(params, lr)
         optimizer_holder["opt"] = optimizer
         return optimizer
 
     monkeypatch.setattr(training_main.torch.optim, "AdamW", _make_optimizer)
-    monkeypatch.setattr(training_main, "save_vqvae_checkpoint", lambda *_args, **_kwargs: None)
 
     output = tmp_path / "vqvae.ckpt"
     training_main.run_training(
@@ -86,7 +90,7 @@ def test_run_training_uses_gradient_accumulation(monkeypatch, tmp_path: Path) ->
         batch_size=1,
         vocab_size=32,
         hidden_size=4,
-        semantic_tokens=16,
+        num_semantic_tokens=16,
         lr=1e-3,
         device="cpu",
         level_index=0,

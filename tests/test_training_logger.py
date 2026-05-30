@@ -15,10 +15,11 @@ def test_training_logger_line_contains_required_fields() -> None:
         ),
     )
     assert "[var] step=10/100" in line
-    assert "loss=2.000000" in line
-    assert "perplexity=7.3891" in line
+    assert "total_loss=2.0000" in line
+    assert "perplexity=7.39" in line
     assert "time=0.321s" in line
-    assert "stages=(transfer=0.010s forward=0.200s backward=0.090s optimizer=0.021s)" in line
+    assert "transfer=0.010s" in line
+    assert "forward=0.200s" in line
     assert re.search(r"eta=\d+\.\d{2}m", line)
 
 

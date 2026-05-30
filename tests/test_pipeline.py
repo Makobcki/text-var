@@ -76,8 +76,8 @@ def test_generate_flow(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(TextVARPipeline, "_load_var", lambda self, _: _DummyVAR())
     capture: dict[str, torch.Tensor] = {}
 
-    def _fake_decode(model, batch_size, device, prefix_inputs=None):
-        del model
+    def _fake_decode(model, batch_size, device, prefix_inputs=None, **kwargs):
+        del model, kwargs
         assert prefix_inputs is not None
         capture["prefix"] = prefix_inputs[0]
         return [
@@ -158,7 +158,7 @@ def test_load_var_uses_model_config(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("src.core.pipeline.VARTransformer", _FakeVAR)
     monkeypatch.setattr(
         "src.core.pipeline.torch.load",
-        lambda path, map_location: {
+        lambda path, map_location, weights_only=False: {
             "model": {"w": torch.tensor(1)},
             "model_config": {
                 "level_vocab_sizes": [101, 202, 303],
@@ -178,7 +178,9 @@ def test_load_var_uses_model_config(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_vqvae_decode_from_semantic_indices_shape_and_bos() -> None:
-    model = SemanticTextVQVAE(vocab_size=16, hidden_size=8, num_semantic_tokens=8).eval()
+    from src.vqvae.config import VQVAEConfig
+    config = VQVAEConfig(vocab_size=16, hidden_size=16, num_semantic_tokens=8, decoder_num_heads=8)
+    model = SemanticTextVQVAE(config).eval()
     semantic_indices = torch.tensor([[1, 2], [3, 4]], dtype=torch.long)
     generated = model.decode_from_semantic_indices(
         semantic_indices,
@@ -191,7 +193,9 @@ def test_vqvae_decode_from_semantic_indices_shape_and_bos() -> None:
 
 
 def test_vqvae_decode_rejects_invalid_max_length() -> None:
-    model = SemanticTextVQVAE(vocab_size=16, hidden_size=8, num_semantic_tokens=8).eval()
+    from src.vqvae.config import VQVAEConfig
+    config = VQVAEConfig(vocab_size=16, hidden_size=16, num_semantic_tokens=8, decoder_num_heads=8)
+    model = SemanticTextVQVAE(config).eval()
     try:
         model.decode_from_semantic_indices(
             torch.tensor([[1]], dtype=torch.long),
@@ -205,7 +209,9 @@ def test_vqvae_decode_rejects_invalid_max_length() -> None:
 
 
 def test_vqvae_decode_rejects_invalid_sampling_params() -> None:
-    model = SemanticTextVQVAE(vocab_size=16, hidden_size=8, num_semantic_tokens=8).eval()
+    from src.vqvae.config import VQVAEConfig
+    config = VQVAEConfig(vocab_size=16, hidden_size=16, num_semantic_tokens=8, decoder_num_heads=8)
+    model = SemanticTextVQVAE(config).eval()
 
     try:
         model.decode_from_semantic_indices(
@@ -252,15 +258,14 @@ def test_parallel_block_draft_raises_rollback_on_high_chaos(monkeypatch) -> None
             batch, block_len = current_level_input.shape
             return torch.zeros((batch, block_len, 4), dtype=torch.float32)
 
-    def _fake_sampling(logits, alpha, healthy_entropy_limit):
-        del logits, alpha, healthy_entropy_limit
+    def _fake_sampling(logits, alpha, healthy_entropy_limit, temperature, top_p):
+        del logits, alpha, healthy_entropy_limit, temperature, top_p
         return (
             torch.zeros((2,), dtype=torch.long),
             torch.zeros((2,), dtype=torch.float32),
             torch.ones((2,), dtype=torch.float32),
         )
-
-    monkeypatch.setattr("generator.thermodynamic_sampling_with_stats", _fake_sampling)
+    monkeypatch.setattr("src.var.generator.thermodynamic_sampling_with_stats", _fake_sampling)
 
     try:
         _parallel_block_draft(
@@ -274,6 +279,8 @@ def test_parallel_block_draft_raises_rollback_on_high_chaos(monkeypatch) -> None
             cfg_scale=1.0,
             alpha=1.0,
             healthy_entropy_limit=1.5,
+            temperature=1.0,
+            top_p=1.0,
             rollback_chaos_threshold=0.5,
         )
     except RollbackEvent as exc:
@@ -323,20 +330,13 @@ def test_load_vqvae_uses_model_config(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, int] = {}
 
     class _FakeVQVAE(torch.nn.Module):
-        def __init__(
-            self,
-            vocab_size: int = 32000,
-            hidden_size: int = 1024,
-            num_semantic_tokens: int = 4096,
-            semantic_sequence_length: int = 1,
-            pad_token_id: int = 0,
-        ):
+        def __init__(self, config):
             super().__init__()
-            captured["vocab_size"] = int(vocab_size)
-            captured["hidden_size"] = int(hidden_size)
-            captured["num_semantic_tokens"] = int(num_semantic_tokens)
-            captured["semantic_sequence_length"] = int(semantic_sequence_length)
-            captured["pad_token_id"] = int(pad_token_id)
+            captured["vocab_size"] = int(config.vocab_size)
+            captured["hidden_size"] = int(config.hidden_size)
+            captured["num_semantic_tokens"] = int(config.num_semantic_tokens)
+            captured["semantic_sequence_length"] = int(config.semantic_sequence_length)
+            captured["pad_token_id"] = int(config.pad_token_id)
 
         def load_state_dict(self, state_dict, strict=False):
             del state_dict, strict

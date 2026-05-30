@@ -4,7 +4,10 @@ from src.var.training.config import VARConfig
 
 
 class _ToyModel:
-    def __init__(self, eos_token_id: int) -> None:
+    def __init__(self, eos_token_id: int, pad_token_id: int | None = None) -> None:
+        kwargs = {}
+        if pad_token_id is not None:
+            kwargs["pad_token_id"] = pad_token_id
         self.cfg = VARConfig(
             level_vocab_sizes=(8, 8, 8),
             level_lengths=(2, 8, 32),
@@ -14,6 +17,7 @@ class _ToyModel:
             mlp_ratio=1.0,
             exit_layers=(),
             eos_token_id=eos_token_id,
+            **kwargs
         )
 
     def __call__(self, *args, **kwargs):
@@ -26,7 +30,7 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
     sampled_tokens = [torch.tensor([5]), torch.tensor([2])]
     draft_lengths: list[int] = []
 
-    def _fake_decode_with_cache(**kwargs):
+    def _fake_decode_with_cache(model, **kwargs):
         del kwargs
         token = sampled_tokens.pop(0)
         return (
@@ -36,7 +40,7 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
             [],
         )
 
-    def _fake_decode_no_cache(**kwargs):
+    def _fake_decode_no_cache(model, **kwargs):
         del kwargs
         return (
             torch.tensor([1]),
@@ -44,7 +48,7 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
             torch.zeros((1,), dtype=torch.float32),
         )
 
-    def _fake_parallel_block_draft(**kwargs):
+    def _fake_parallel_block_draft(model, **kwargs):
         draft_lengths.append(int(kwargs["len_lvl_2"]))
         return torch.zeros((1, kwargs["len_lvl_2"]), dtype=torch.long)
 
@@ -54,7 +58,7 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
     )
     monkeypatch.setattr("src.var.generator._parallel_block_draft", _fake_parallel_block_draft)
     monkeypatch.setattr(
-        "src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"]
+        "src.var.generator._inpaint_block_seams", lambda model, **kwargs: kwargs["lvl_2_tokens"]
     )
 
     output = hybrid_cascade_decode(model, batch_size=1, device=torch.device("cpu"))
@@ -65,23 +69,25 @@ def test_hierarchical_eos_truncates_level_2(monkeypatch) -> None:
 
 
 def test_phase2_finished_rows_are_padded(monkeypatch) -> None:
-    model = _ToyModel(eos_token_id=2)
-    model.cfg.pad_token_id = 0
+    model = _ToyModel(eos_token_id=2, pad_token_id=0)
     sampled_tokens = [torch.tensor([2, 5]), torch.tensor([7, 6])]
 
-    def _fake_decode_with_cache(**kwargs):
+    def _fake_decode_with_cache(model, **kwargs):
         del kwargs
-        token = sampled_tokens.pop(0)
+        if sampled_tokens:
+            token = sampled_tokens.pop(0)
+        else:
+            token = torch.tensor([2, 2])
         return token, torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32), []  # noqa: E501
 
-    def _fake_decode_no_cache(**kwargs):
+    def _fake_decode_no_cache(model, **kwargs):
         del kwargs
         return torch.tensor([1, 1]), torch.zeros((2,), dtype=torch.float32), torch.zeros((2,), dtype=torch.float32)  # noqa: E501
 
     monkeypatch.setattr("src.var.generator._decode_next_ar_token", _fake_decode_no_cache)
     monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)  # noqa: E501
-    monkeypatch.setattr("src.var.generator._parallel_block_draft", lambda **kwargs: torch.zeros((2, kwargs["len_lvl_2"]), dtype=torch.long))  # noqa: E501
-    monkeypatch.setattr("src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"])  # noqa: E501
+    monkeypatch.setattr("src.var.generator._parallel_block_draft", lambda model, **kwargs: torch.zeros((2, kwargs["len_lvl_2"]), dtype=torch.long))  # noqa: E501
+    monkeypatch.setattr("src.var.generator._inpaint_block_seams", lambda model, **kwargs: kwargs["lvl_2_tokens"])  # noqa: E501
 
     output = hybrid_cascade_decode(model, batch_size=2, device=torch.device("cpu"))
     lvl1 = output[1]
@@ -92,7 +98,7 @@ def test_hybrid_cascade_decode_retries_twice_after_rollback(monkeypatch) -> None
     model = _ToyModel(eos_token_id=2)
     attempt_count = {"count": 0}
 
-    def _fake_decode_with_cache(**kwargs):
+    def _fake_decode_with_cache(model, **kwargs):
         del kwargs
         return (
             torch.tensor([2]),
@@ -101,7 +107,7 @@ def test_hybrid_cascade_decode_retries_twice_after_rollback(monkeypatch) -> None
             [],
         )
 
-    def _fake_decode_no_cache(**kwargs):
+    def _fake_decode_no_cache(model, **kwargs):
         del kwargs
         return (
             torch.tensor([1]),
@@ -109,7 +115,7 @@ def test_hybrid_cascade_decode_retries_twice_after_rollback(monkeypatch) -> None
             torch.zeros((1,), dtype=torch.float32),
         )
 
-    def _fake_parallel_block_draft(**kwargs):
+    def _fake_parallel_block_draft(model, **kwargs):
         attempt_count["count"] += 1
         threshold = kwargs.get("rollback_chaos_threshold", 0.5)
         if threshold != float("inf"):
@@ -122,7 +128,7 @@ def test_hybrid_cascade_decode_retries_twice_after_rollback(monkeypatch) -> None
     monkeypatch.setattr("src.var.generator._decode_next_ar_token_with_cache", _fake_decode_with_cache)  # noqa: E501
     monkeypatch.setattr("src.var.generator._parallel_block_draft", _fake_parallel_block_draft)
     monkeypatch.setattr(
-        "src.var.generator._inpaint_block_seams", lambda **kwargs: kwargs["lvl_2_tokens"]
+        "src.var.generator._inpaint_block_seams", lambda model, **kwargs: kwargs["lvl_2_tokens"]
     )
 
     output = hybrid_cascade_decode(model, batch_size=1, device=torch.device("cpu"))
@@ -154,10 +160,10 @@ def test_encode_multiscale_supports_dynamic_levels() -> None:
     )
 
     assert len(levels) == 4
-    assert levels[0][:2] == [1, 2]
-    assert levels[1][:3] == [1, 3, 5]
-    assert levels[2][:4] == [1, 2, 3, 4]
-    assert levels[3][:8] == [1, 2, 3, 4, 5, 6, 7, 2]
+    assert levels[0][:2] == [1, 0]  # stride=8: [1], padded to length 2
+    assert levels[1][:3] == [1, 5, 0]  # stride=4: [1, 5], padded to length 3
+    assert levels[2][:4] == [1, 3, 5, 7]  # stride=2: [1, 3, 5, 7], padded to length 4
+    assert levels[3][:8] == [1, 2, 3, 4, 5, 6, 7, 2]  # stride=1: full sequence
 
 
 def test_resolve_phase3_level2_length_scales_by_config_proportion() -> None:

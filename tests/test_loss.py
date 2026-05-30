@@ -20,43 +20,39 @@ def test_cross_entropy_per_token_ignores_padding_tokens() -> None:
         ignore_index=None,
     )[targets != ignore_index]
 
-    assert masked_losses.numel() == 1
-    assert torch.allclose(masked_losses, expected_losses)
+    assert masked_losses[targets != ignore_index].numel() == 1
+    assert torch.allclose(masked_losses[targets != ignore_index], expected_losses)
+    assert torch.all(masked_losses[targets == ignore_index] == 0.0)
 
 
 def test_cross_entropy_per_token_returns_finite_when_all_tokens_ignored() -> None:
-    logits = torch.tensor([[[1.0, 0.0], [0.5, 0.5]]], dtype=torch.float32)
+    logits = torch.tensor([[[3.0, 0.5], [0.1, 3.2]]], dtype=torch.float32)
     targets = torch.tensor([0, 0], dtype=torch.long)
-
     masked_losses = _cross_entropy_per_token(
-        logits,
-        targets,
-        use_flash=False,
-        ignore_index=0,
+        logits, targets, use_flash=False, ignore_index=0
     )
+    assert torch.isfinite(masked_losses).all()
+    assert float(masked_losses.sum()) == 0.0
 
-    valid_losses = masked_losses[targets != 0]
-    assert valid_losses.numel() == 0
 
-
-class _DummyCfg:
-    flash_cross_entropy = False
-    pad_token_id = 0
-    mask_token_id = 1
+class _DummyConfig:
+    def __init__(self):
+        self.pad_token_id = 0
+        self.mask_token_id = 1
 
 
 class _DummyModel:
-    def __init__(self) -> None:
-        self.cfg = _DummyCfg()
+    def __init__(self):
+        self.cfg = _DummyConfig()
 
     def __call__(
         self,
         prefix_inputs,
-        target_level,
-        current_level_input,
-        batch_size,
-        return_early_outputs,
-        precomputed_final_memory=None,
+        target_level: int,
+        current_level_input: torch.Tensor,
+        batch_size: int | None = None,
+        return_early_outputs: bool = False,
+        precomputed_final_memory: torch.Tensor | None = None,
     ):
         del prefix_inputs, target_level, batch_size, return_early_outputs, precomputed_final_memory
         seq_len = current_level_input.shape[1]
@@ -94,7 +90,7 @@ def test_masked_weighting_is_stable_for_sparse_mask() -> None:
     from src.var.loss import multiscale_next_scale_cross_entropy
 
     model = _DummyModel()
-    tokens = torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.long)
+    tokens = torch.tensor([[1, 2, 3, 1, 2, 3]], dtype=torch.long)
     loss_a = multiscale_next_scale_cross_entropy(
         model,
         [tokens],
