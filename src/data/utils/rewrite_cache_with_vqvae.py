@@ -48,18 +48,23 @@ def _load_vqvae_checkpoint(
     Raises:
         ValueError: If checkpoint does not contain a model state dictionary.
     """
-    payload = torch.load(checkpoint_path, map_location=device)
-    model_state = payload.get("model") if isinstance(payload, dict) else None
-    if not isinstance(model_state, dict):
-        raise ValueError(f"Checkpoint {checkpoint_path} has no 'model' state dict.")
-
     model = SemanticTextVQVAE(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
         num_semantic_tokens=semantic_tokens,
         semantic_sequence_length=semantic_sequence_length,
     ).to(device)
-    model.load_state_dict(model_state)
+
+    if str(checkpoint_path).endswith(".safetensors"):
+        from safetensors.torch import load_model
+        load_model(model, checkpoint_path, strict=False)
+    else:
+        payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        model_state = payload.get("model") if isinstance(payload, dict) else None
+        if not isinstance(model_state, dict):
+            raise ValueError(f"Checkpoint {checkpoint_path} has no 'model' state dict.")
+        model.load_state_dict(model_state, strict=False)
+
     model.eval()
     return model
 
