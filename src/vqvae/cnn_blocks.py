@@ -44,12 +44,14 @@ class HierarchicalDownsample1D(nn.Module):
     def __init__(self, dim: int, compression_rate: int = 4, num_blocks: int = 2, gradient_checkpointing: bool = False):
         super().__init__()
         self.gradient_checkpointing = gradient_checkpointing
+        self.input_norm = nn.GroupNorm(1, dim, eps=1e-6)
         self.down_conv = nn.Conv1d(
             in_channels=dim, out_channels=dim, kernel_size=compression_rate, stride=compression_rate
         )
         self.blocks = nn.ModuleList([ConvNeXT1DBlock(dim=dim) for _ in range(num_blocks)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.input_norm(x)
         x = self.down_conv(x)
         use_ckpt = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block in self.blocks:
