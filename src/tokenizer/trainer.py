@@ -1,44 +1,52 @@
+from __future__ import annotations
+
+import logging
+from typing import Iterable
+
+from rich.logging import RichHandler
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, processors, trainers
 from transformers import PreTrainedTokenizerFast
 
+# Setup Rich Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(show_path=False, rich_tracebacks=True)],
+)
+logger = logging.getLogger("tokenizer_trainer")
+
 
 class BPETokenizerTrainer:
-    """
-    Класс для обучения кастомного Byte-Level BPE токенизатора.
-    Адаптирован для задач текстовой генерации (VAR).
-    """
+    """Trainer for a custom Byte-Level BPE tokenizer, adapted for text generation tasks."""
 
     def __init__(
         self,
         vocab_size: int = 32000,
         special_tokens: list[str] | None = None,
         min_frequency: int = 2,
-    ):
+    ) -> None:
         self.vocab_size = vocab_size
         self.min_frequency = min_frequency
 
-        # Базовые специальные токены. Можно расширить маркерами масштабов для VAR.
         self.special_tokens = special_tokens or [
             "<pad>",
             "<unk>",
-            "<s>",  # Начало последовательности (BOS)
-            "</s>",  # Конец последовательности (EOS)
+            "<s>",
+            "</s>",
             "<mask>",
         ]
 
-        # Инициализация BPE модели
         self.tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
-
-        # ByteLevel позволяет обрабатывать любые символы без UNK-токенов
         self.tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
         self.tokenizer.decoder = decoders.ByteLevel()
 
     def train_from_files(self, files: str | list[str]) -> PreTrainedTokenizerFast:
-        """
-        Обучает токенизатор на списке текстовых файлов.
-        """
+        """Train the tokenizer on a list of text files."""
         if isinstance(files, str):
             files = [files]
+
+        logger.info(f"Training tokenizer on {len(files)} files...")
 
         trainer = trainers.BpeTrainer(
             vocab_size=self.vocab_size,
@@ -48,12 +56,11 @@ class BPETokenizerTrainer:
         )
 
         self.tokenizer.train(files, trainer)
-
-        # Настройка пост-процессора
         self.tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
 
-        # Оборачиваем в transformers tokenizer для удобства интеграции в модель
-        fast_tokenizer = PreTrainedTokenizerFast(
+        logger.info("Training complete. Wrapping into PreTrainedTokenizerFast...")
+
+        return PreTrainedTokenizerFast(
             tokenizer_object=self.tokenizer,
             unk_token="<unk>",
             pad_token="<pad>",
@@ -62,12 +69,12 @@ class BPETokenizerTrainer:
             mask_token="<mask>",
         )
 
-        return fast_tokenizer
+    def train_from_iterator(
+        self, iterator: Iterable[str], length: int | None = None
+    ) -> PreTrainedTokenizerFast:
+        """Train the tokenizer from a Python generator (e.g., HuggingFace Datasets)."""
+        logger.info("Training tokenizer from an iterator...")
 
-    def train_from_iterator(self, iterator, length: int | None = None) -> PreTrainedTokenizerFast:
-        """
-        Альтернативный метод обучения из Python-генератора (полезно для HuggingFace Datasets).
-        """
         trainer = trainers.BpeTrainer(
             vocab_size=self.vocab_size,
             special_tokens=self.special_tokens,
@@ -77,6 +84,8 @@ class BPETokenizerTrainer:
 
         self.tokenizer.train_from_iterator(iterator, trainer=trainer, length=length)
         self.tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
+
+        logger.info("Training complete. Wrapping into PreTrainedTokenizerFast...")
 
         return PreTrainedTokenizerFast(
             tokenizer_object=self.tokenizer,
