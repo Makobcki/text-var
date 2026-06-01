@@ -4,3 +4,7 @@
 uv.lock
 runs/
 checkpoints/
+dataset/*
+!dataset/.gitkeep
+tokenizer/*
+!tokenizer/.gitkeep
