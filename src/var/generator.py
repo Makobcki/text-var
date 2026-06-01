@@ -1,9 +1,17 @@
+import logging
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from rich.logging import RichHandler
 
 from src.var.model import RingKVCacheView, VARTransformer
+
+# Setup Rich Logging
+logger = logging.getLogger("hybrid_decoder")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    logger.addHandler(RichHandler(show_path=False, rich_tracebacks=True))
 
 
 class RollbackEvent(RuntimeError):
@@ -711,7 +719,7 @@ def hybrid_cascade_decode(
             raise ValueError(f"prefix_inputs[{level_idx}] must be rank-2 tensor with shape (B, L).")
         if level_tokens.shape[0] != batch:
             raise ValueError(
-                f"prefix_inputs[{level_idx}] batch mismatch: expected {batch}, got {level_tokens.shape[0]}."  # noqa: E501
+                f"prefix_inputs[{level_idx}] batch mismatch: expected {batch}, got {level_tokens.shape[0]}."
             )
         if level_tokens.shape[1] > expected_len:
             raise ValueError(
@@ -722,14 +730,15 @@ def hybrid_cascade_decode(
 
     len_lvl_0 = model.cfg.level_lengths[0]
     if len(out) < 1:
-        print(f"[HYBRID] Фаза 1: AR Генерация макро-плана ({len_lvl_0} шагов)...")
+        logger.info(f"Phase 1: AR Macro-plan generation ({len_lvl_0} steps)...")
         lvl_0_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
     else:
         lvl_0_sequence = out[0]
-        print(
-            "[HYBRID] Фаза 1: AR продолжение макро-плана "
+        logger.info(
+            f"Phase 1: AR Macro-plan continuation "
             f"(prefix={lvl_0_sequence.shape[1]}, target={len_lvl_0})..."
         )
+
     for _ in range(lvl_0_sequence.shape[1], len_lvl_0):
         next_token, _, _ = _decode_next_ar_token(
             model,
@@ -750,14 +759,15 @@ def hybrid_cascade_decode(
 
     len_lvl_1 = model.cfg.level_lengths[1]
     if len(out) < 2:
-        print(f"[HYBRID] Фаза 2: AR Генерация структурного каркаса ({len_lvl_1} шагов)...")
+        logger.info(f"Phase 2: AR Structural framework generation ({len_lvl_1} steps)...")
         lvl_1_sequence = torch.empty((batch, 0), dtype=torch.long, device=device)
     else:
         lvl_1_sequence = out[1]
-        print(
-            "[HYBRID] Фаза 2: AR продолжение структурного каркаса "
+        logger.info(
+            f"Phase 2: AR Structural framework continuation "
             f"(prefix={lvl_1_sequence.shape[1]}, target={len_lvl_1})..."
         )
+
     past_key_values: list[tuple[torch.Tensor, torch.Tensor] | RingKVCacheView] | None = None
     turbo_cfg = TurboQuantConfig() if turboquant_kv else None
     cache_ring_buffer = KVCacheRingBuffer(max_window=max_local_window, turboquant_config=turbo_cfg)
@@ -767,6 +777,7 @@ def hybrid_cascade_decode(
     tokens_remaining = max(0, len_lvl_1 - lvl_1_sequence.shape[1])
     num_chunks = (tokens_remaining + chunk_size - 1) // chunk_size
     global_level_0_memory = out[0]
+
     for _chunk_idx in range(num_chunks):
         chunk_start = lvl_1_sequence.shape[1]
         chunk_end = min(len_lvl_1, chunk_start + chunk_size)
@@ -807,6 +818,7 @@ def hybrid_cascade_decode(
                 break
         if finished.all():
             break
+
     if len(out) < 2:
         out.append(lvl_1_sequence)
     else:
@@ -822,9 +834,7 @@ def hybrid_cascade_decode(
     block_count = max(1, min(actual_lvl_1_len, len_lvl_2 // min_block))
     block_size = max(min_block, len_lvl_2 // block_count)
 
-    print(
-        f"[HYBRID] Фаза 3.1: Параллельный драфт ({block_count} блоков, block_size={block_size})..."
-    )
+    logger.info(f"Phase 3.1: Parallel draft ({block_count} blocks, block_size={block_size})...")
     try:
         lvl_2_draft = _parallel_block_draft(
             model,
@@ -841,8 +851,8 @@ def hybrid_cascade_decode(
             top_p=top_p,
         )
     except RollbackEvent as event:
-        print(
-            f"[HYBRID] rollback block=[{event.block_start}, {event.block_end}) -> conservative resample"  # noqa: E501
+        logger.warning(
+            f"Rollback block=[{event.block_start}, {event.block_end}) -> conservative resample"
         )
         try:
             lvl_2_draft = _parallel_block_draft(
@@ -861,7 +871,7 @@ def hybrid_cascade_decode(
                 rollback_chaos_threshold=1.0,
             )
         except RollbackEvent:
-            print("[HYBRID] conservative rollback repeated -> disabling rollback guard")
+            logger.warning("Conservative rollback repeated -> disabling rollback guard")
             lvl_2_draft = _parallel_block_draft(
                 model,
                 prefix_inputs=out,
@@ -878,7 +888,7 @@ def hybrid_cascade_decode(
                 rollback_chaos_threshold=float("inf"),
             )
 
-    print("[HYBRID] Фаза 3.2: Шовная склейка (latent inpainting)...")
+    logger.info("Phase 3.2: Seam stitching (latent inpainting)...")
     lvl_2_tokens = _inpaint_block_seams(
         model,
         prefix_inputs=out,
@@ -894,5 +904,5 @@ def hybrid_cascade_decode(
     )
 
     out.append(lvl_2_tokens)
-    print("[HYBRID] Генерация завершена.")
+    logger.info("Generation completed.")
     return out

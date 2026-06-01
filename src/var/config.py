@@ -4,11 +4,12 @@ from typing import Any
 
 @dataclass(frozen=True)
 class VARConfig:
-    # Уровень 0: Семантические токены (VQ-VAE словарь сюжетов)
-    # Уровень 1: Локальные токены (BPE словарь текста)
+    # Level 0: Semantic tokens (VQ-VAE story dictionary)
+    # Level 1: Local structural tokens (BPE text dictionary subset)
+    # Level 2: High-resolution tokens (Full BPE text dictionary)
     level_vocab_sizes: tuple[int, ...] = (4096, 2048, 32000)
 
-    # 32 "сюжетных" шага, 1024 текстовых BPE-шага
+    # 32 "story" steps, 128 structural steps, 1024 full BPE steps
     level_lengths: tuple[int, ...] = (32, 128, 1024)
 
     hidden_size: int = 1024
@@ -17,14 +18,14 @@ class VARConfig:
     mlp_ratio: float = 4.0
     dropout: float = 0.1
 
-    exit_layers: tuple[int, ...] = (4, 8, 12)  # Слои Early Exit
+    exit_layers: tuple[int, ...] = (4, 8, 12)  # Early Exit layers
     pad_token_id: int = 0
-    mask_token_id: int = 1  # Используется для NAR генерации
+    mask_token_id: int = 1  # Used for NAR (Non-Autoregressive) generation
     eos_token_id: int = 2
     gradient_checkpointing: bool = False
     local_attention_radius: int = 0
     use_fp8: bool = False
-    
+
     use_moe: bool = False
     num_experts: int = 8
     moe_top_k: int = 2

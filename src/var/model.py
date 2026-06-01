@@ -6,10 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from src.var.fp8 import get_linear_layer
 from src.var.training.config import VARConfig
 from src.var.turboquant_math import generate_orthogonal_matrix
 from src.var.turboquant_triton import TurboQuantTritonInputs, turboquant_attention
-from src.var.fp8 import get_linear_layer
 
 if TYPE_CHECKING:
     from src.var.generator import TurboQuantCodec
@@ -72,6 +72,7 @@ def apply_rotary_pos_emb(
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
@@ -83,23 +84,34 @@ class RMSNorm(nn.Module):
         x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x
 
+
 class SwiGLU(nn.Module):
-    def __init__(self, in_features: int, hidden_features: int, out_features: int, dropout: float = 0.0, use_fp8: bool = False):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int,
+        out_features: int,
+        dropout: float = 0.0,
+        use_fp8: bool = False,
+    ):
         super().__init__()
         self.w1 = get_linear_layer(in_features, hidden_features, bias=False, use_fp8=use_fp8)
         self.w2 = get_linear_layer(in_features, hidden_features, bias=False, use_fp8=use_fp8)
         self.w3 = get_linear_layer(hidden_features, out_features, bias=False, use_fp8=use_fp8)
         self.dropout = nn.Dropout(dropout)
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+
 
 try:
     from megablocks.layers.arguments import Arguments as MoEArgs
     from megablocks.layers.dmoe import dMoE
+
     HAS_MEGABLOCKS = True
 except ImportError:
     HAS_MEGABLOCKS = False
+
 
 class MegablocksMoEWrapper(nn.Module):
     def __init__(self, hidden: int, ff_hidden: int, num_experts: int, top_k: int):
@@ -112,64 +124,89 @@ class MegablocksMoEWrapper(nn.Module):
             moe_capacity_factor=1.0,
             moe_loss_weight=1.0,
             moe_expert_model_parallelism=False,
-            device=torch.cuda.current_device() if torch.cuda.is_available() else torch.device("cpu"),
-            bf16=True, 
-            mlp_type='swiglu',
-            mlp_impl='grouped'
+            device=torch.cuda.current_device()
+            if torch.cuda.is_available()
+            else torch.device("cpu"),
+            bf16=True,
+            mlp_type="swiglu",
+            mlp_impl="grouped",
         )
         self.moe = dMoE(args)
-        
+
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, seq_len, hidden = x.shape
         x_flat = x.view(-1, hidden)
         out_flat, _ = self.moe(x_flat)
         out = out_flat.view(batch_size, seq_len, hidden)
         # megablocks router typically stores l_aux
-        aux_loss = getattr(self.moe.router, "l_aux", torch.tensor(0.0, device=x.device, dtype=x.dtype))
+        aux_loss = getattr(
+            self.moe.router, "l_aux", torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        )
         return out, aux_loss
 
+
 class SparseMoE(nn.Module):
-    def __init__(self, hidden: int, ff_hidden: int, num_experts: int, top_k: int, dropout: float = 0.0, use_fp8: bool = False):
+    def __init__(
+        self,
+        hidden: int,
+        ff_hidden: int,
+        num_experts: int,
+        top_k: int,
+        dropout: float = 0.0,
+        use_fp8: bool = False,
+    ):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
         self.router = get_linear_layer(hidden, num_experts, bias=False, use_fp8=False)
-        self.experts = nn.ModuleList([
-            SwiGLU(hidden, ff_hidden, hidden, dropout, use_fp8=use_fp8)
-            for _ in range(num_experts)
-        ])
+        self.experts = nn.ModuleList(
+            [
+                SwiGLU(hidden, ff_hidden, hidden, dropout, use_fp8=use_fp8)
+                for _ in range(num_experts)
+            ]
+        )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, seq_len, hidden = x.shape
         x_flat = x.view(-1, hidden)
-        
+
         router_logits = self.router(x_flat)
         routing_weights = F.softmax(router_logits, dim=-1)
-        
+
         routing_weights_topk, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         routing_weights_topk = routing_weights_topk / routing_weights_topk.sum(dim=-1, keepdim=True)
-        
+
         final_output = torch.zeros_like(x_flat)
         tokens_per_expert = torch.zeros(self.num_experts, device=x.device, dtype=x.dtype)
         router_probs = routing_weights.mean(dim=0)
-        
+
         for expert_idx in range(self.num_experts):
-            expert_mask = (selected_experts == expert_idx)
+            expert_mask = selected_experts == expert_idx
             token_indices, k_indices = torch.where(expert_mask)
             tokens_per_expert[expert_idx] = token_indices.numel() / (x_flat.shape[0] * self.top_k)
-            
+
             if token_indices.numel() > 0:
                 expert_inputs = x_flat[token_indices]
                 expert_outputs = self.experts[expert_idx](expert_inputs)
                 weights = routing_weights_topk[token_indices, k_indices].unsqueeze(-1)
                 final_output[token_indices] += expert_outputs * weights
-                
+
         aux_loss = self.num_experts * torch.sum(router_probs * tokens_per_expert)
         return final_output.view(batch_size, seq_len, hidden), aux_loss
 
 
 class SDPADecoderLayer(nn.Module):
-    def __init__(self, hidden: int, num_heads: int, mlp_ratio: float, dropout: float = 0.1, use_fp8: bool = False, use_moe: bool = False, num_experts: int = 8, moe_top_k: int = 2) -> None:
+    def __init__(
+        self,
+        hidden: int,
+        num_heads: int,
+        mlp_ratio: float,
+        dropout: float = 0.1,
+        use_fp8: bool = False,
+        use_moe: bool = False,
+        num_experts: int = 8,
+        moe_top_k: int = 2,
+    ) -> None:
         super().__init__()
         self.hidden = hidden
         self.num_heads = num_heads
@@ -187,13 +224,15 @@ class SDPADecoderLayer(nn.Module):
         # Round up to multiple of 128 for FP8 compatibility and optimal CUDA tiling
         if use_fp8:
             ff_hidden = ((ff_hidden + 127) // 128) * 128
-            
+
         self.use_moe = use_moe
         if self.use_moe:
             if HAS_MEGABLOCKS:
                 self.ffn = MegablocksMoEWrapper(hidden, ff_hidden, num_experts, moe_top_k)
             else:
-                self.ffn = SparseMoE(hidden, ff_hidden, num_experts, moe_top_k, dropout, use_fp8=use_fp8)
+                self.ffn = SparseMoE(
+                    hidden, ff_hidden, num_experts, moe_top_k, dropout, use_fp8=use_fp8
+                )
         else:
             self.ffn = SwiGLU(hidden, ff_hidden, hidden, dropout, use_fp8=use_fp8)
 
@@ -300,7 +339,7 @@ class SDPADecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         x = tgt
 
-        # 1. Self-Attention с собственной нормализацией
+        # 1. Self-Attention with custom normalization
         x1 = self.norm_self_attn(x)
         qkv = self.self_qkv(x1)
         q, k, v = qkv.chunk(3, dim=-1)
@@ -373,7 +412,7 @@ class SDPADecoderLayer(nn.Module):
         self_attn_out = self.dropout(self.self_out(self._merge_heads(self_attn)))
         x = x + self_attn_out
 
-        # 2. Cross-Attention с собственной нормализацией
+        # 2. Cross-Attention with custom normalization
         x2 = self.norm_cross_attn(x)
         cq = self.cross_q(x2)
         if cross_kv_memory is None:
@@ -393,7 +432,7 @@ class SDPADecoderLayer(nn.Module):
         cross_attn_out = self.dropout(self.cross_out(self._merge_heads(cross_attn)))
         x = x + cross_attn_out
 
-        # 3. FFN с собственной нормализацией
+        # 3. FFN with custom normalization
         x3 = self.norm_ffn(x)
         aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
         if self.use_moe:
@@ -440,14 +479,19 @@ class VARTransformer(nn.Module):
         self.norm = RMSNorm(hidden)
 
         self.heads = nn.ModuleList(
-            [get_linear_layer(hidden, vocab_size, use_fp8=bool(getattr(cfg, "use_fp8", False))) for vocab_size in cfg.level_vocab_sizes]
+            [
+                get_linear_layer(hidden, vocab_size, use_fp8=bool(getattr(cfg, "use_fp8", False)))
+                for vocab_size in cfg.level_vocab_sizes
+            ]
         )
 
         self.early_exit_heads = nn.ModuleDict()
         for layer_idx in cfg.exit_layers:
             for scale_idx, vocab_size in enumerate(cfg.level_vocab_sizes):
                 head_key = f"layer_{layer_idx}_scale_{scale_idx}"
-                self.early_exit_heads[head_key] = get_linear_layer(hidden, vocab_size, use_fp8=bool(getattr(cfg, "use_fp8", False)))
+                self.early_exit_heads[head_key] = get_linear_layer(
+                    hidden, vocab_size, use_fp8=bool(getattr(cfg, "use_fp8", False))
+                )
 
     def _validate_token_ids(self, token_ids: torch.Tensor, *, level_idx: int, source: str) -> None:
         """Validate that token ids are in-range for the given hierarchical level.
@@ -660,11 +704,15 @@ class VARTransformer(nn.Module):
                 (logits_cond, early_cond), aux_loss_cond = out_cond
                 (logits_uncond, early_uncond), aux_loss_uncond = out_uncond
                 final_logits = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
-                final_early = [u + cfg_scale * (c - u) for c, u in zip(early_cond, early_uncond, strict=True)]  # noqa: E501
+                final_early = [
+                    u + cfg_scale * (c - u) for c, u in zip(early_cond, early_uncond, strict=True)
+                ]  # noqa: E501
                 return (final_logits, final_early), aux_loss_cond + aux_loss_uncond
             out_cond_tensor, aux_loss_cond = out_cond
             out_uncond_tensor, aux_loss_uncond = out_uncond
-            return out_uncond_tensor + cfg_scale * (out_cond_tensor - out_uncond_tensor), aux_loss_cond + aux_loss_uncond
+            return out_uncond_tensor + cfg_scale * (
+                out_cond_tensor - out_uncond_tensor
+            ), aux_loss_cond + aux_loss_uncond
 
         if prefix_inputs:
             b = prefix_inputs[0].shape[0]
@@ -674,7 +722,15 @@ class VARTransformer(nn.Module):
             b = batch_size if batch_size else 1
 
         target_idx = target_level if target_level is not None else len(prefix_inputs)
-        total_aux_loss = torch.tensor(0.0, device=x.device if 'x' in locals() else prefix_inputs[0].device if prefix_inputs else self.target_token.device, dtype=self.target_token.dtype)
+        total_aux_loss = torch.tensor(
+            0.0,
+            device=x.device
+            if "x" in locals()
+            else prefix_inputs[0].device
+            if prefix_inputs
+            else self.target_token.device,
+            dtype=self.target_token.dtype,
+        )
         if precomputed_final_memory is None:
             _, memories_by_target, prefix_aux = self._encode_prefix_memories(
                 prefix_inputs[:target_idx],
