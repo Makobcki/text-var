@@ -89,6 +89,59 @@ class TextVARPipeline:
         )[0]
 
     @torch.no_grad()
+    def generate_with_repl(
+        self,
+        prompt: str,
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        max_retries: int = 3,
+        turboquant_kv: bool = False,
+    ) -> tuple[str, bool, str | None]:
+        """Generate text with a REPL-like self-correction loop for Python syntax.
+
+        Args:
+            prompt: Initial input text prompt.
+            max_new_tokens: Maximum output token length per generation.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
+            max_retries: Maximum number of syntax error corrections.
+            turboquant_kv: TurboQuant flag.
+
+        Returns:
+            Tuple of (Final generated text, success boolean, syntax error string if failed).
+        """
+        from src.core.executor import extract_python_code, check_syntax
+
+        current_prompt = prompt
+        last_generated_text = ""
+        last_error = None
+
+        for _ in range(max_retries + 1):
+            last_generated_text = self.generate(
+                prompt=current_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                turboquant_kv=turboquant_kv,
+            )
+
+            code = extract_python_code(last_generated_text)
+            if not code:
+                # No code found, consider it a failure for code generation tasks
+                return last_generated_text, False, "No python code block found in generation."
+
+            success, error_msg = check_syntax(code)
+            if success:
+                return last_generated_text, True, None
+
+            last_error = error_msg
+            # Self-correct
+            current_prompt += f"{last_generated_text}\n\nAn error occurred during syntax check:\n{error_msg}\nPlease fix the code.\n"
+
+        return last_generated_text, False, last_error
+
+    @torch.no_grad()
     def generate_batch(
         self,
         prompts: list[str],
