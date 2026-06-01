@@ -5,23 +5,25 @@ import logging
 from pathlib import Path
 
 import torch
+from rich.logging import RichHandler
 from safetensors.torch import load_file, save_file
 
 from src.data.token_cache import load_token_cache_metadata
 from src.vqvae.model import SemanticTextVQVAE
 
-LOGGER = logging.getLogger(__name__)
-
 
 def configure_logging(verbose: bool) -> None:
-    """Configure logging for CLI execution.
+    """Configure logging for CLI execution."""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(show_path=verbose, rich_tracebacks=True)],
+    )
 
-    Args:
-        verbose: Enables DEBUG-level metadata-rich logging when True.
-    """
-    level = logging.DEBUG if verbose else logging.WARNING
-    fmt = "[%(levelname)s] - %(message)s - [%(filename)s:%(lineno)d]" if verbose else "%(message)s"
-    logging.basicConfig(level=level, format=fmt)
+
+LOGGER = logging.getLogger("rewrite_cache")
 
 
 def _load_vqvae_checkpoint(
@@ -57,6 +59,7 @@ def _load_vqvae_checkpoint(
 
     if str(checkpoint_path).endswith(".safetensors"):
         from safetensors.torch import load_model
+
         load_model(model, checkpoint_path, strict=False)
     else:
         payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -175,6 +178,10 @@ def main() -> None:
     args = parser.parse_args()
 
     configure_logging(args.verbose)
+    LOGGER.info(
+        f"Starting rewrite process from level {args.level_from} to level {args.level_to}..."
+    )
+
     rewritten = rewrite_cache_with_vqvae(
         token_cache_dir=args.token_cache_dir,
         checkpoint_path=args.checkpoint,
@@ -184,7 +191,7 @@ def main() -> None:
         semantic_tokens=args.semantic_tokens,
         device=args.device,
     )
-    print(f"Rewritten entries: {rewritten}")
+    LOGGER.info(f"Successfully rewritten entries: {rewritten}")
 
 
 if __name__ == "__main__":

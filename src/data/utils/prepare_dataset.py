@@ -2,16 +2,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import signal
+import sys
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import torch
+from rich.logging import RichHandler
 from safetensors.torch import save_file
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from src.data.token_cache import TokenCacheMetadata
+
+# Setup Rich Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(show_path=False, rich_tracebacks=True)],
+)
+logger = logging.getLogger("prepare_dataset")
 
 _WORKER_TOKENIZERS: dict[tuple[str, bool], object] = {}
 
@@ -40,15 +53,7 @@ def _fit_to_level(
 
 
 def _append_eos(token_ids: list[int], *, eos_token_id: int) -> list[int]:
-    """Return a copy of token ids with EOS appended.
-
-    Args:
-        token_ids: Source token id sequence.
-        eos_token_id: EOS token id value.
-
-    Returns:
-        New sequence that always ends with EOS.
-    """
+    """Return a copy of token ids with EOS appended."""
     return [*token_ids, int(eos_token_id)]
 
 
@@ -73,7 +78,10 @@ def _encode_multiscale(
     token_ids_with_eos = _append_eos(token_ids, eos_token_id=eos_token_id)
     level_count = len(level_lengths)
     encoded_levels: list[list[int]] = []
-    for level_idx, (level_length, vocab_size) in enumerate(zip(level_lengths, level_vocab_sizes, strict=True)):  # noqa: E501
+
+    for level_idx, (level_length, vocab_size) in enumerate(
+        zip(level_lengths, level_vocab_sizes, strict=True)
+    ):
         stride_power = max(0, level_count - level_idx - 1)
         stride = 2**stride_power
         encoded_levels.append(
@@ -97,11 +105,7 @@ def process_single_line(
     text = str(payload.get("content", payload.get("text", ""))).strip()
 
     if not text:
-        return {
-            "id": str(index),
-            "tokens": None,
-            "bytes_processed": len(line.encode("utf-8")),
-        }
+        return {"id": str(index), "tokens": None, "bytes_processed": len(line.encode("utf-8"))}
 
     tokenizer = _get_tokenizer(tokenizer_name, use_fast)
     token_ids = tokenizer.encode(text, add_special_tokens=False)
@@ -110,11 +114,7 @@ def process_single_line(
         eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 3
 
     if not token_ids:
-        return {
-            "id": str(index),
-            "tokens": None,
-            "bytes_processed": len(line.encode("utf-8")),
-        }
+        return {"id": str(index), "tokens": None, "bytes_processed": len(line.encode("utf-8"))}
 
     multiscale_tokens = _encode_multiscale(
         token_ids,
@@ -134,16 +134,7 @@ def process_single_line(
 def _save_chunk_as_safetensors(
     chunk_path: Path, batch_entries: list[dict[str, object]], level_count: int
 ) -> None:
-    """Persist one chunk in safetensors format using contiguous tensors.
-
-    Args:
-        chunk_path: Destination safetensors path.
-        batch_entries: Tokenized entries for a single chunk.
-        level_count: Number of multiscale token levels.
-
-    Raises:
-        ValueError: If any entry has an invalid number of token levels.
-    """
+    """Persist one chunk in safetensors format using contiguous tensors."""
     tensor_payload: dict[str, torch.Tensor] = {
         "ids": torch.tensor([int(item["index"]) for item in batch_entries], dtype=torch.int64),
     }
@@ -162,10 +153,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Multi-core Tokenizer for VAR.")
     parser.add_argument("--input", type=Path, required=True, help="Input dataset file.")
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
-        help="Output directory for batched token cache.",
+        "--output-dir", type=Path, required=True, help="Output directory for batched token cache."
     )
     parser.add_argument("--field", type=str, default="content")
     parser.add_argument("--kind", type=str, default="vq")
@@ -185,17 +173,9 @@ def main(argv: list[str] | None = None) -> None:
         help="Use python tokenizer instead of fast backend.",
     )
     parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=max(1, min(8, cpu_count() - 1)),
-        help="Worker processes (cap to reduce RAM pressure).",
+        "--num-workers", type=int, default=max(1, min(8, cpu_count() - 1)), help="Worker processes."
     )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=4000,
-        help="How many samples per chunk file (lower = less RAM).",
-    )
+    parser.add_argument("--batch-size", type=int, default=4000, help="Samples per chunk file.")
 
     args = parser.parse_args(argv)
 
@@ -209,17 +189,13 @@ def main(argv: list[str] | None = None) -> None:
 
     total_bytes = os.path.getsize(args.input)
     num_workers = int(args.num_workers)
-    print(f"Запуск параллельной токенизации на {num_workers} ядрах CPU...")
 
-    # Создаем чистую целевую папку
+    logger.info(f"Starting parallel tokenization on {num_workers} CPU cores...")
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Сохраняем метадату отдельно, чтобы она лежала рядом с батчами
     with open(args.output_dir / "metadata.json", "w", encoding="utf-8") as fM:
         json.dump(metadata.to_dict(), fM, ensure_ascii=False, indent=2)
-
-    import signal
-    import sys
 
     def _handle_sigterm(signum, frame):
         raise KeyboardInterrupt()
@@ -234,68 +210,64 @@ def main(argv: list[str] | None = None) -> None:
     total_saved_docs = 0
 
     try:
-        with Pool(processes=num_workers, initializer=_init_worker) as pool, open(args.input, encoding="utf-8") as f:  # noqa: E501
+        with (
+            Pool(processes=num_workers, initializer=_init_worker) as pool,
+            open(args.input, encoding="utf-8") as f,
+        ):
 
-                def argument_generator():
-                    for idx, line in enumerate(f):
-                        yield (
-                            line,
-                            idx,
-                            metadata.level_lengths,
-                            metadata.level_vocab_sizes,
-                            args.tokenizer_name,
-                            not args.slow_tokenizer,
-                            args.eos_token_id,
-                        )
+            def argument_generator():
+                for idx, line in enumerate(f):
+                    yield (
+                        line,
+                        idx,
+                        metadata.level_lengths,
+                        metadata.level_vocab_sizes,
+                        args.tokenizer_name,
+                        not args.slow_tokenizer,
+                        args.eos_token_id,
+                    )
 
-                pbar = tqdm(
-                    total=total_bytes,
-                    unit="B",
-                    unit_scale=True,
-                    unit_divisor=1024,
-                    desc="Токенизация",
-                )
+            pbar = tqdm(
+                total=total_bytes, unit="B", unit_scale=True, unit_divisor=1024, desc="Tokenizing"
+            )
 
-                for result in pool.imap(process_single_line, argument_generator(), chunksize=256):
-                    pbar.update(result["bytes_processed"])
+            for result in pool.imap(process_single_line, argument_generator(), chunksize=256):
+                pbar.update(result["bytes_processed"])
 
-                    if result["tokens"] is not None:
-                        current_batch.append(
-                            {
-                                "id": result["id"],
-                                "index": result["index"],
-                                "tokens": result["tokens"],
-                            }
-                        )
-                        total_saved_docs += 1
+                if result["tokens"] is not None:
+                    current_batch.append(
+                        {
+                            "id": result["id"],
+                            "index": result["index"],
+                            "tokens": result["tokens"],
+                        }
+                    )
+                    total_saved_docs += 1
 
-                    if len(current_batch) >= args.batch_size:
-                        chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
-                        _save_chunk_as_safetensors(
-                            chunk_path, current_batch, len(metadata.level_lengths)
-                        )
-
-                        current_batch = []
-                        batch_index += 1
-
-                if current_batch:
+                if len(current_batch) >= args.batch_size:
                     chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
                     _save_chunk_as_safetensors(
                         chunk_path, current_batch, len(metadata.level_lengths)
                     )
-                    del current_batch
+                    current_batch = []
+                    batch_index += 1
 
-                pbar.close()
+            if current_batch:
+                chunk_path = args.output_dir / f"tokens_chunk_{batch_index:04d}.safetensors"
+                _save_chunk_as_safetensors(chunk_path, current_batch, len(metadata.level_lengths))
+                del current_batch
+
+            pbar.close()
 
     except KeyboardInterrupt:
-        print("\n[!] Процесс прерван сигналом SIGINT/SIGTERM. Остановка пула воркеров...")
+        logger.warning("Process interrupted by user (SIGINT/SIGTERM). Stopping worker pool...")
         sys.exit(1)
 
     if total_saved_docs == 0:
         raise ValueError("Input dataset is empty or contains no valid records.")
 
-    print(
-        f"Успешно завершено! Сохранено {total_saved_docs:,} документов разбитых на {batch_index + 1} чанков в '{args.output_dir}'."  # noqa: E501
+    logger.info(
+        f"Successfully processed {total_saved_docs:,} documents into {batch_index + 1} chunks in '{args.output_dir}'."
     )
 
 

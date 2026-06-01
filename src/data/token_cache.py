@@ -20,8 +20,8 @@ class TokenCacheDataError(ValueError):
 @dataclass(frozen=True)
 class TokenCacheMetadata:
     kind: str
-    level_vocab_sizes: tuple[int, ...]  # Размер алфавита для каждого уровня
-    level_lengths: tuple[int, ...]  # Явная длина последовательности каждого уровня
+    level_vocab_sizes: tuple[int, ...]  # Alphabet size for each level
+    level_lengths: tuple[int, ...]  # Explicit sequence length for each level
     codebook_dim: int
     max_token_length: int
     format_version: int = 1
@@ -51,12 +51,12 @@ class TokenCacheMetadata:
 
         if len(vocab_sizes) != len(lengths):
             raise ValueError(
-                f"Размерности массивов не совпадают: len(level_lengths)={len(lengths)} "
+                f"Array dimensions mismatch: len(level_lengths)={len(lengths)} "
                 f"!= len(level_vocab_sizes)={len(vocab_sizes)}."
             )
         if sum(lengths) > int(self.max_token_length):
             raise ValueError(
-                f"Сумма level_lengths ({sum(lengths)}) превышает max_token_length ({self.max_token_length})."  # noqa: E501
+                f"Sum of level_lengths ({sum(lengths)}) exceeds max_token_length ({self.max_token_length})."
             )
 
 
@@ -72,7 +72,7 @@ def load_token_cache_metadata(path: str | Path) -> TokenCacheMetadata:
 
 def validate_tokenizer_metadata(actual: TokenCacheMetadata, expected: TokenCacheMetadata) -> None:
     if len(actual.level_lengths) != len(actual.level_vocab_sizes):
-        raise ValueError("level_lengths и level_vocab_sizes должны иметь одинаковую длину.")
+        raise ValueError("level_lengths and level_vocab_sizes must have the same length.")
 
     for field_name in (
         "kind",
@@ -83,12 +83,11 @@ def validate_tokenizer_metadata(actual: TokenCacheMetadata, expected: TokenCache
     ):
         if getattr(actual, field_name) != getattr(expected, field_name):
             raise ValueError(
-                "Tokenizer metadata mismatch for "
-                f"{field_name}: {getattr(actual, field_name)!r} != "
-                f"{getattr(expected, field_name)!r}."
+                f"Tokenizer metadata mismatch for {field_name}: "
+                f"{getattr(actual, field_name)!r} != {getattr(expected, field_name)!r}."
             )
     if sum(actual.level_lengths) > int(actual.max_token_length):
-        raise ValueError("Сумма level_lengths превышает max_token_length.")
+        raise ValueError("Sum of level_lengths exceeds max_token_length.")
 
 
 def build_synthetic_token_entries(
@@ -238,7 +237,7 @@ class MultiscaleTokenChunkIterableDataset(IterableDataset):
         if torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
             world_size = torch.distributed.get_world_size()
-            paths = paths[rank :: world_size]
+            paths = paths[rank::world_size]
 
         worker_info = get_worker_info()
         if worker_info is None:

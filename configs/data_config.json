@@ -1,0 +1,106 @@
+{
+  "datasets": [
+    {
+      "name": "fineweb-edu",
+      "role": "main",
+      "target_size_gb": 25,
+      "text_col": "text",
+      "kwargs": {
+        "path": "HuggingFaceFW/fineweb-edu",
+        "name": "sample-10BT",
+        "split": "train"
+      }
+    },
+    {
+      "name": "open-web-math",
+      "role": "main",
+      "target_size_gb": 12,
+      "text_col": "text",
+      "kwargs": {
+        "path": "open-web-math/open-web-math",
+        "split": "train"
+      }
+    },
+    {
+      "name": "github-issues",
+      "role": "main",
+      "target_size_gb": 8,
+      "text_col": "content",
+      "kwargs": {
+        "path": "bigcode/the-stack-github-issues",
+        "split": "train"
+      }
+    },
+    {
+      "name": "the-stack",
+      "role": "remote",
+      "target_size_gb": 40,
+      "text_col": "content",
+      "kwargs": {
+        "path": "bigcode/the-stack",
+        "data_dir": "data/python",
+        "split": "train"
+      }
+    },
+    {
+      "name": "redpajama-arxiv",
+      "role": "remote",
+      "target_size_gb": 15,
+      "text_col": "text",
+      "kwargs": {
+        "path": "togethercomputer/RedPajama-Data-1T",
+        "name": "arxiv",
+        "split": "train"
+      }
+    },
+    {
+      "name": "pg19",
+      "role": "remote",
+      "target_size_gb": 5,
+      "text_col": "text",
+      "kwargs": {
+        "path": "deepmind/pg19",
+        "split": "train"
+      }
+    },
+    {
+      "name": "pile-uncopyrighted",
+      "role": "remote",
+      "target_size_gb": 10,
+      "text_col": "text",
+      "kwargs": {
+        "path": "monology/pile-uncopyrighted",
+        "split": "train"
+      }
+    },
+    {
+      "name": "github-code",
+      "role": "remote",
+      "target_size_gb": 3,
+      "text_col": "code",
+      "kwargs": {
+        "path": "codeparrot/github-code",
+        "languages": ["Python"],
+        "split": "train"
+      }
+    },
+    {
+      "name": "commitpack",
+      "role": "remote",
+      "target_size_gb": 2,
+      "text_cols": [
+        "subject",
+        "message",
+        "old_file",
+        "new_file",
+        "old_contents",
+        "new_contents"
+      ],
+      "kwargs": {
+        "path": "bigcode/commitpack",
+        "name": "python",
+        "split": "train"
+      }
+    }
+  ]
+}
